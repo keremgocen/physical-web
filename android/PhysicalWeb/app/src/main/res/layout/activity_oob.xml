@@ -5,6 +5,7 @@
     android:layout_height="match_parent"
     android:background="@android:color/white"
     android:orientation="vertical"
+    tools:ignore="Overdraw"
     tools:context="org.physical_web.physicalweb.OobActivity">
 
     <WebView
@@ -27,8 +28,8 @@
         android:gravity="bottom"
         android:orientation="horizontal"
         android:paddingBottom="18dp"
-        android:paddingLeft="16dp"
-        android:paddingRight="16dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
         android:paddingTop="18dp"
         android:id="@+id/oob_accept_button">
 

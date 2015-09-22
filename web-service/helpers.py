@@ -13,167 +13,216 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-from datetime import datetime, timedelta
-from google.appengine.api import taskqueue, urlfetch
-from lxml import etree
+
+try:
+    from google.appengine.api import taskqueue, urlfetch, app_identity
+    import models
+except Exception as e:
+    if __name__ != '__main__':
+        raise e
+    else:
+        print "Warning: import exception '{0}'".format(e)
+
+from urllib import quote_plus
 from urlparse import urljoin, urlparse
 import cgi
+import datetime
 import json
 import logging
-import models
+import lxml.etree
+
+################################################################################
+
+ENABLE_EXPERIMENTAL = app_identity.get_application_id().endswith('-dev')
+PHYSICAL_WEB_USER_AGENT = 'Mozilla/5.0' # TODO: Find a more descriptive string.
+BASE_URL = 'https://' + app_identity.get_application_id() + '.appspot.com'
 
 ################################################################################
 
 def BuildResponse(objects):
     metadata_output = []
+    unresolved_output = []
 
     # Resolve the devices
     for obj in objects:
-        key_id = None
-        url = None
-        force = obj.get('force', False)
-        valid = True
-        siteInfo = None
-        rssi = None
-        txpower = None
+        url = obj.get('url', None)
+        force_update = obj.get('force', False)
+        rssi = obj.get('rssi', None)
+        txpower = obj.get('txpower', None)
+        distance = ComputeDistance(rssi, txpower)
 
-        if 'id' in obj:
-            key_id = obj['id']
-        elif 'url' in obj:
-            key_id = obj['url']
-            url = obj['url']
-            parsed_url = urlparse(url)
-            if parsed_url.scheme != 'http' and parsed_url.scheme != 'https':
-                valid = False
-
-        # We need to go and fetch.  We probably want to asyncly fetch.
-
-        try:
-            rssi = float(obj['rssi'])
-            txpower = float(obj['txpower'])
-        except:
+        def append_invalid():
+            #unresolved_output.append({
+            #    'id': url
+            #})
             pass
 
-        if valid:
-            # Really if we don't have the data we should not return it.
-            siteInfo = models.SiteInformation.get_by_id(url)
+        if url is None:
+            continue
 
-            if force or siteInfo is None:
-                # If we don't have the data or it is older than 5 minutes, fetch.
-                siteInfo = FetchAndStoreUrl(siteInfo, url)
-            if siteInfo is not None and siteInfo.updated_on < datetime.now() - timedelta(minutes=5):
-                # Updated time to make sure we don't request twice.
-                siteInfo.put()
-                # Add request to queue.
-                taskqueue.add(url='/refresh-url', params={'url': url})
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != 'http' and parsed_url.scheme != 'https':
+            append_invalid()
+            continue
 
-        device_data = {};
-        if siteInfo is not None:
-            device_data['id'] = url
-            device_data['url'] = siteInfo.url
-            if siteInfo.title is not None:
-                device_data['title'] = siteInfo.title
-            if siteInfo.description is not None:
-                device_data['description'] = siteInfo.description
-            if siteInfo.favicon_url is not None:
-                device_data['icon'] = siteInfo.favicon_url
-            if siteInfo.jsonlds is not None:
-                device_data['json-ld'] = json.loads(siteInfo.jsonlds)
-        else:
-            device_data['id'] = url
-            device_data['url'] = url
-        device_data['rssi'] = rssi
-        device_data['txpower'] = txpower
+        try:
+            siteInfo = GetSiteInfoForUrl(url, distance, force_update)
+        except FailedFetchException:
+            append_invalid()
+            continue
+
+        if siteInfo is None:
+            # It's a valid url, which we didn't fail to fetch, so it must be `No Content`
+            continue
+
+        device_data = {}
+        device_data['id'] = url
+        # TODO: change url to the original url (perhaps minus our goo.gl shortened values)
+        device_data['url'] = siteInfo.url
+        # TODO: change displayUrl to the "most applicable" url (resolve shorteners, but perhaps not all redirects)
+        device_data['displayUrl'] = siteInfo.url
+        if siteInfo.title is not None:
+            device_data['title'] = siteInfo.title
+        if siteInfo.description is not None:
+            device_data['description'] = siteInfo.description
+        if siteInfo.favicon_url is not None:
+            device_data['icon'] = urljoin(BASE_URL, '/favicon?url=' + quote_plus(siteInfo.favicon_url))
+        if siteInfo.jsonlds is not None:
+            device_data['json-ld'] = json.loads(siteInfo.jsonlds)
+        device_data['distance'] = distance
+        device_data['groupid'] = ComputeGroupId(siteInfo.url, siteInfo.title, siteInfo.description)
 
         metadata_output.append(device_data)
 
-    def ReplaceRssiTxPowerWithPathLossAsRank(device_data):
-        try:
-            path_loss = device_data['txpower'] - device_data['rssi']
-            device_data['rank'] = path_loss
-        except:
-            # This fallback case is for requests which did not include rssi
-            # and txpower. We could just not return any rank in this case,
-            # but we may have other signals to use in the future, and always
-            # returning some rank value for any request type could make client
-            # implementations easier.  So lets just return a high fake value.
-            device_data['rank'] = 1000.0
-        finally:
-            del device_data['txpower']
-            del device_data['rssi']
-        return device_data
 
-    metadata_output = map(ReplaceRssiTxPowerWithPathLossAsRank, RankedResponse(metadata_output))
-    return metadata_output
+    metadata_output = map(ReplaceDistanceWithRank, RankedResponse(metadata_output))
+
+    ret = {
+        "metadata": metadata_output,
+    }
+
+    if unresolved_output:
+        ret["unresolved"] = unresolved_output
+
+    return ret
 
 ################################################################################
 
-def RankedResponse(metadata_output):
-    def ComputeDistance(obj):
-        try:
-            rssi = float(obj['rssi'])
-            txpower = float(obj['txpower'])
-            if rssi == 127 or rssi == 128:
-                # TODO: What does rssi 127 mean, compared to no value?
-                # According to wiki, 127 is MAX and 128 is INVALID.
-                # I think we should just leave 127 to calc distance as usual, so it sorts to the end but before the unknowns
-                return None
-            path_loss = txpower - rssi
-            distance = pow(10.0, path_loss - 41) # TODO: Took this from Hoa's patch, but should confirm accuracy
-            return distance
-        except:
+def ComputeDistance(rssi, txpower):
+    try:
+        rssi = float(rssi)
+        txpower = float(txpower)
+        if rssi in [127, 128]: # Known invalid rssi values
             return None
+        path_loss = txpower - rssi
+        distance = pow(10.0, (path_loss - 41) / 20)
+        return distance
+    except:
+        return None
 
+def RankedResponse(metadata_output):
     def SortByDistanceCmp(a, b):
-        dista, distb = ComputeDistance(a), ComputeDistance(b)
-        return cmp(dista, distb)
+        return cmp(a['distance'], b['distance'])
 
     metadata_output.sort(SortByDistanceCmp)
     return metadata_output
 
+def ReplaceDistanceWithRank(device_data):
+    distance = device_data['distance']
+    distance = distance if distance is not None else 1000
+    device_data['rank'] = distance
+    device_data.pop('distance', None)
+    return device_data
+
 ################################################################################
 
-def FetchAndStoreUrl(siteInfo, url):
+def ComputeGroupId(url, title, description):
+    import hashlib
+    domain = urlparse(url).netloc
+    seed = domain + '\0' + title
+    groupid = hashlib.sha1(seed).hexdigest()[:16]
+    return groupid
+
+################################################################################
+
+# This is used to recursively look up in cache after each redirection.
+# We don't cache the redirection itself, but we always want to cache the final destination.
+def GetSiteInfoForUrl(url, distance=None, force_update=False):
+    logging.info('GetSiteInfoForUrl url:{0}, distance:{1}'.format(url, distance))
+
+    siteInfo = None
+
+    if force_update:
+        siteInfo = FetchAndStoreUrl(siteInfo, url, distance, force_update)
+    else:
+        siteInfo = models.SiteInformation.get_by_id(url)
+
+        if siteInfo is None:
+            siteInfo = FetchAndStoreUrl(siteInfo, url, distance, force_update)
+        else:
+            # If the cache is older than 5 minutes, queue a refresh
+            updated_ago = datetime.datetime.now() - siteInfo.updated_on
+            if updated_ago > datetime.timedelta(minutes=5):
+                logging.info('Queue RefreshUrl for url: {0}, which was updated {1} ago'.format(url, updated_ago))
+                # Add request to queue.
+                taskqueue.add(url='/refresh-url', params={'url': url})
+
+    return siteInfo
+
+################################################################################
+
+class FailedFetchException(Exception):
+    pass
+
+def FetchAndStoreUrl(siteInfo, url, distance=None, force_update=False):
     # Index the page
     try:
-        result = urlfetch.fetch(url, validate_certificate = True)
+        headers = {'User-Agent': PHYSICAL_WEB_USER_AGENT}
+        if ENABLE_EXPERIMENTAL and distance is not None:
+            headers['X-PhysicalWeb-Distance'] = distance
+
+        result = urlfetch.fetch(url,
+                                follow_redirects=False,
+                                validate_certificate=True,
+                                headers=headers)
     except:
-        return StoreInvalidUrl(siteInfo, url)
+        logging.info('FetchAndStoreUrl FailedFetch url:{0}'.format(url))
+        raise FailedFetchException()
 
-    if result.status_code == 200:
+    logging.info('FetchAndStoreUrl url:{0}, status_code:{1}'.format(url, result.status_code))
+    if result.status_code == 200 and result.content: # OK
         encoding = GetContentEncoding(result.content)
-        final_url = GetExpandedURL(url)
-        real_final_url = result.final_url
-        if real_final_url is None:
-            real_final_url = final_url
-        return StoreUrl(siteInfo, url, final_url, real_final_url, result.content, encoding)
+        assert result.final_url is None
+        # TODO: Use the cache-content headers for storeUrl!
+        return StoreUrl(siteInfo, url, result.content, encoding)
+    elif result.status_code == 204: # No Content
+        return None
+    elif result.status_code in [301, 302, 303, 307, 308]: # Moved Permanently, Found, See Other, Temporary Redirect, Permanent Redirect
+        final_url = urljoin(url, result.headers['location'])
+        logging.info('FetchAndStoreUrl url:{0}, redirects_to:{1}'.format(url, final_url))
+        if siteInfo is not None:
+            logging.info('Removing Stale Cache for url:{0}'.format(url))
+            siteInfo.key.delete()
+        # TODO: Most redirects should not be cached, but we should still check!
+        return GetSiteInfoForUrl(final_url, distance, force_update)
+    elif 500 <= result.status_code <= 599:
+        return None
     else:
-        return StoreInvalidUrl(siteInfo, url)
-
-################################################################################
-
-def GetExpandedURL(url):
-    parsed_url = urlparse(url)
-    final_url = url
-    url_shorteners = ['t.co', 'goo.gl', 'bit.ly', 'j.mp', 'bitly.com',
-        'amzn.to', 'fb.com', 'bit.do', 'adf.ly', 'u.to', 'tinyurl.com',
-        'buzurl.com', 'yourls.org', 'qr.net']
-    url_shorteners_set = set(url_shorteners)
-    if parsed_url.netloc in url_shorteners_set and (parsed_url.path != '/' or
-        parsed_url.path != ''):
-        # expand
-        result = urlfetch.fetch(url, method = 'HEAD', follow_redirects = False)
-        if result.status_code == 301:
-            final_url = result.headers['location']
-    return final_url
+        raise FailedFetchException()
 
 ################################################################################
 
 def GetContentEncoding(content):
+    try:
+        # Don't assume server return proper charset and always try UTF-8 first.
+        u_value = unicode(content, 'utf-8')
+        return 'utf-8'
+    except UnicodeDecodeError:
+        pass
+
     encoding = None
-    parser = etree.HTMLParser(encoding='iso-8859-1')
-    htmltree = etree.fromstring(content, parser)
+    parser = lxml.etree.HTMLParser(encoding='iso-8859-1')
+    htmltree = lxml.etree.fromstring(content, parser)
     value = htmltree.xpath("//head//meta[@http-equiv='Content-Type']/attribute::content")
     if encoding is None:
         if (len(value) > 0):
@@ -188,12 +237,8 @@ def GetContentEncoding(content):
             encoding = value[0]
 
     if encoding is None:
-        try:
-            encoding = 'utf-8'
-            u_value = unicode(content, 'utf-8')
-        except UnicodeDecodeError:
-            encoding = 'iso-8859-1'
-            u_value = unicode(content, 'iso-8859-1')
+        encoding = 'iso-8859-1'
+        u_value = unicode(content, 'iso-8859-1')
 
     return encoding
 
@@ -212,33 +257,38 @@ def FlattenString(input):
 
 ################################################################################
 
-def StoreInvalidUrl(siteInfo, url):
-    if siteInfo is None:
-        siteInfo = models.SiteInformation.get_or_insert(url, 
-            url = url,
-            title = None,
-            favicon_url = None,
-            description = None,
-            jsonlds = None)
-    else:
-        # Don't update if it was already cached.
-        siteInfo.put()
-
-    return siteInfo
-
-################################################################################
-
-def StoreUrl(siteInfo, url, final_url, real_final_url, content, encoding):
+def StoreUrl(siteInfo, url, content, encoding):
     title = None
     description = None
     icon = None
 
     # parse the content
-    parser = etree.HTMLParser(encoding=encoding)
-    htmltree = etree.fromstring(content, parser)
-    value = htmltree.xpath('//head//title/text()');
+    parser = lxml.etree.HTMLParser(encoding=encoding)
+    htmltree = lxml.etree.fromstring(content, parser)
+
+    # Try to find web manifest <link rel="manifest" href="...">.
+    value = htmltree.xpath("//link[@rel='manifest']/attribute::href")
     if (len(value) > 0):
-        title = value[0]
+        # Fetch web manifest.
+        manifestUrl = value[0]
+        if "://" not in manifestUrl:
+            manifestUrl = urljoin(url, manifestUrl)
+        try:
+            result = urlfetch.fetch(manifestUrl)
+            if result.status_code == 200:
+                manifestData = json.loads(result.content)
+                if 'short_name' in manifestData:
+                    title = manifestData['short_name']
+                else:
+                    title = manifestData['name']
+        except:
+            pass
+
+    # Try to use <title>...</title>.
+    if title is None:
+        value = htmltree.xpath('//head//title/text()');
+        if (len(value) > 0):
+            title = value[0]
     if title is None:
         value = htmltree.xpath("//head//meta[@property='og:title']/attribute::content");
         if (len(value) > 0):
@@ -289,6 +339,7 @@ def StoreUrl(siteInfo, url, final_url, real_final_url, content, encoding):
         if len(description) > 500:
             description = description[:500]
 
+    # Icon
     if icon is None:
         value = htmltree.xpath("//head//link[@rel='shortcut icon']/attribute::href");
         if (len(value) > 0):
@@ -313,43 +364,18 @@ def StoreUrl(siteInfo, url, final_url, real_final_url, content, encoding):
     if icon is not None:
         if icon.startswith('./'):
             icon = icon[2:len(icon)]
-        icon = urljoin(real_final_url, icon)
+        icon = urljoin(url, icon)
     if icon is None:
-        icon = urljoin(real_final_url, '/favicon.ico')
-    # make sure the icon exists
-    try:
-        result = urlfetch.fetch(icon, method = 'HEAD')
-        if result.status_code != 200:
-            icon = None
-        else:
-            contentType = result.headers['Content-Type']
-            if contentType is None:
-                icon = None
-            elif not contentType.startswith('image/'):
-                icon = None
-    except:
-        s_url = url
-        s_final_url = final_url
-        s_real_final_url = real_final_url
-        s_icon = icon
-        if s_url is None:
-            s_url = '[none]'
-        if s_final_url is None:
-            s_final_url = '[none]'
-        if s_real_final_url is None:
-            s_real_final_url = '[none]'
-        if s_icon is None:
-            s_icon = '[none]'
-        logging.warning('icon error with ' + s_url + ' ' + s_final_url + ' ' + s_real_final_url + ' -> ' + s_icon)
-        icon = None
+        icon = urljoin(url, '/favicon.ico')
 
+    # json-lds
     jsonlds = []
     value = htmltree.xpath("//head//script[@type='application/ld+json']/text()");
     for jsonldtext in value:
         jsonldobject = None
         try:
             jsonldobject = json.loads(jsonldtext) # Data is not sanitised.
-        except UnicodeDecodeError:
+        except (ValueError, UnicodeDecodeError):
             jsonldobject = None
         if jsonldobject is not None:
             jsonlds.append(jsonldobject)
@@ -359,16 +385,18 @@ def StoreUrl(siteInfo, url, final_url, real_final_url, content, encoding):
     else:
         jsonlds_data = None
 
+    # Add to cache
     if siteInfo is None:
-        siteInfo = models.SiteInformation.get_or_insert(url, 
-            url = final_url,
+        # Add a new value
+        siteInfo = models.SiteInformation.get_or_insert(url,
+            url = url,
             title = title,
             favicon_url = icon,
             description = description,
             jsonlds = jsonlds_data)
     else:
         # update the data because it already exists
-        siteInfo.url = final_url
+        siteInfo.url = url
         siteInfo.title = title
         siteInfo.favicon_url = icon
         siteInfo.description = description
@@ -379,3 +407,51 @@ def StoreUrl(siteInfo, url, final_url, real_final_url, content, encoding):
 
 ################################################################################
 
+def FaviconUrl(url):
+    # Fetch only favicons for sites we've already added to our database.
+    if models.SiteInformation.query(models.SiteInformation.favicon_url==url).count(limit=1):
+        try:
+            headers = {'User-Agent': PHYSICAL_WEB_USER_AGENT}
+            return urlfetch.fetch(url, headers=headers)
+        except:
+            return None
+    return None
+
+################################################################################
+
+def RefreshUrl(url):
+    siteInfo = models.SiteInformation.get_by_id(url)
+
+    if siteInfo is not None:
+        # If we've done an update within the last 5 seconds, don't do another one.
+        # This is just to prevent abuse, accidental or otherwise
+        updated_ago = datetime.datetime.now() - siteInfo.updated_on
+        if updated_ago < datetime.timedelta(seconds=5):
+            logging.info('Skipping RefreshUrl for url: {0}, which was updated {1} ago'.format(url, updated_ago))
+            return
+
+        # Update the timestamp before starting the request, to make sure we do not request twice.
+        siteInfo.put()
+
+    try:
+        FetchAndStoreUrl(siteInfo, url, force_update=True)
+    except FailedFetchException:
+        pass
+
+
+################################################################################
+
+def GetConfig():
+    import os.path
+    if os.path.isfile('config.SECRET.json'):
+        fname = 'config.SECRET.json'
+    else:
+        fname = 'config.SAMPLE.json'
+    with open(fname) as configfile:
+        return json.load(configfile)
+
+################################################################################
+
+if __name__ == '__main__':
+    for i in range(-22,-100,-1):
+        print i, ComputeDistance(i, -22)

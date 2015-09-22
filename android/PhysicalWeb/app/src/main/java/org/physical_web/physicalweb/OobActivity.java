@@ -16,40 +16,45 @@
 
 package org.physical_web.physicalweb;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
-import android.support.v7.app.ActionBarActivity;
+import android.support.v7.app.AppCompatActivity;
 import android.view.Menu;
 import android.view.View;
-import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
-public class OobActivity extends ActionBarActivity {
+/**
+ * The out of the box activity that let's the user know what this app is all about.
+ */
+public class OobActivity extends AppCompatActivity {
 
   View.OnClickListener mAcceptButtonOnClickListener = new View.OnClickListener() {
 
     @Override
     public void onClick(View v) {
       // Save the opt in preference
-      SharedPreferences sharedPreferences = getSharedPreferences(getString(R.string.physical_web_preference_file_name), Context.MODE_PRIVATE);
+      String preferencesKey = getString(R.string.main_prefs_key);
+      SharedPreferences sharedPreferences = getSharedPreferences(preferencesKey,
+                                                                 Context.MODE_PRIVATE);
       SharedPreferences.Editor editor = sharedPreferences.edit();
       editor.putBoolean(getString(R.string.user_opted_in_flag), true);
-      editor.commit();
+      editor.apply();
 
       // Exit the activity
       finish();
     }
   };
 
+  @SuppressLint("SetJavaScriptEnabled")
   private void initializeWebView() {
     WebView webView = (WebView) findViewById(R.id.oob_webview);
     // Force the background color to update (it uses the color specified in the layout xml)
     webView.setBackgroundColor(0x000);
     webView.getSettings().setJavaScriptEnabled(true);
-    webView.getSettings().setRenderPriority(WebSettings.RenderPriority.HIGH);
     webView.setWebViewClient(new WebViewClient());
     webView.loadUrl(getString(R.string.url_getting_started));
   }

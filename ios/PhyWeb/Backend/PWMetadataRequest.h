@@ -17,13 +17,14 @@
 #import <Foundation/Foundation.h>
 #import <UriBeacon/UriBeacon.h>
 
-#define METADATA_SERVER_HOSTNAME @"url-caster.appspot.com"
-
 @protocol PWMetadataRequestDelegate;
 
 // This class will request to the metadata server the information about a
 // beacon.
 @interface PWMetadataRequest : NSObject
+
+// Returns the name of the physical web server.
++ (NSString *)hostname;
 
 // The list of peripherals.
 @property(nonatomic, retain) NSArray * /* UBUriBeacon */ uriBeacons;
@@ -41,6 +42,8 @@
 // It will be nil if no error happened. Otherwise, it's the error that happened
 // during the request.
 @property(nonatomic, retain, readonly) NSError *error;
+
+@property(nonatomic, assign, readonly) NSTimeInterval delay;
 
 // Start the request.
 - (void)start;

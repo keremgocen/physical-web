@@ -23,8 +23,14 @@
 
 @property(nonatomic, retain) UBUriBeacon *uriBeacon;
 
-// URL of the page (if shortened, it will be expanded).
+// URL of the page stored on the beacon.
 @property(nonatomic, copy) NSURL *URL;
+
+// URL of the page to display to the user.
+@property(nonatomic, copy) NSURL *displayURL;
+
+// Whether the display URL has been set by the server.
+@property(nonatomic, assign) BOOL hasDisplayURL;
 
 // Title of the page.
 @property(nonatomic, copy) NSString *title;
@@ -44,11 +50,20 @@
 // Region of the beacon.
 @property(nonatomic, assign) UBUriBeaconRegion region;
 
-// Score of the beacon, computed by the metadata server.
-@property(nonatomic, assign) double score;
+// Rank of the beacon, computed by the metadata server.
+@property(nonatomic, assign) double rank;
 
-// Returns YES if the score has been computed by the metadata server.
-@property(nonatomic, assign) BOOL hasScore;
+// Returns YES if the rank has been computed by the metadata server.
+@property(nonatomic, assign) BOOL hasRank;
+
+// Returns the delay to discover the beacon via bluetooth.
+@property(nonatomic, assign) NSTimeInterval discoveryDelay;
+
+// Returns the delay to get the metadata of the beacon via The Physical Web
+// Server.
+@property(nonatomic, assign) NSTimeInterval requestDelay;
+
+@property (nonatomic, retain, readonly) NSArray * rssiHistory;
 
 // Returns the region name of the beacon when it was created.
 - (NSString *)debugRegionName;

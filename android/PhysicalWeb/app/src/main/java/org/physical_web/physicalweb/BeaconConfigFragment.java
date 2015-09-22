@@ -27,6 +27,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.ParcelUuid;
 import android.os.SystemClock;
+import android.support.v4.content.res.ResourcesCompat;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
@@ -67,10 +68,10 @@ import java.util.concurrent.TimeUnit;
 public class BeaconConfigFragment extends Fragment implements TextView.OnEditorActionListener {
 
   private static final String TAG = "BeaconConfigFragment";
-  // TODO: default value for TxPower should be in another module
   private static final byte TX_POWER_DEFAULT = -22;
   private static final long SCAN_TIME_MILLIS = TimeUnit.SECONDS.toMillis(15);
-  private static final ParcelUuid[] mScanFilterUuids = new ParcelUuid[]{ProtocolV2.CONFIG_SERVICE_UUID, ProtocolV1.CONFIG_SERVICE_UUID};
+  private static final ParcelUuid[] mScanFilterUuids =
+      new ParcelUuid[]{ProtocolV2.CONFIG_SERVICE_UUID, ProtocolV1.CONFIG_SERVICE_UUID};
   private final BluetoothAdapter.LeScanCallback mLeScanCallback = new LeScanCallback();
   private BluetoothDevice mNearestDevice;
   private RegionResolver mRegionResolver;
@@ -115,12 +116,14 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
   private void initializeBluetooth() {
     // Initializes a Bluetooth adapter. For API version 18 and above,
     // get a reference to BluetoothAdapter through BluetoothManager.
-    final BluetoothManager bluetoothManager = (BluetoothManager) getActivity().getSystemService(Context.BLUETOOTH_SERVICE);
+    final BluetoothManager bluetoothManager =
+        (BluetoothManager) getActivity().getSystemService(Context.BLUETOOTH_SERVICE);
     mBluetoothAdapter = bluetoothManager.getAdapter();
   }
 
   @Override
-  public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+  public View onCreateView(LayoutInflater inflater, ViewGroup container,
+                           Bundle savedInstanceState) {
     // Inflate the layout for this fragment
     View view = inflater.inflate(R.layout.fragment_beacon_config, container, false);
 
@@ -135,7 +138,8 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
 
     // Setup the animation
     mScanningStatus = (TextView) view.findViewById(R.id.textView_scanningStatus);
-    mScanningAnimation = (AnimationDrawable) getResources().getDrawable(R.drawable.scanning_animation);
+    mScanningAnimation = (AnimationDrawable) ResourcesCompat.getDrawable(
+        getResources(), R.drawable.scanning_animation, null);
     mScanningStatus.setCompoundDrawablesWithIntrinsicBounds(null, mScanningAnimation, null, null);
 
     Button button = (Button) view.findViewById(R.id.edit_card_save);
@@ -166,6 +170,7 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
     super.onPause();
     mScanningAnimation.stop();
     scanLeDevice(false);
+    PwsClient.getInstance(getActivity()).cancelAllRequests(TAG);
     if (mUriBeaconConfig != null) {
       mUriBeaconConfig.closeUriBeacon();
     }
@@ -176,7 +181,6 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
     super.onPrepareOptionsMenu(menu);
     menu.findItem(R.id.action_config).setVisible(false);
     menu.findItem(R.id.action_about).setVisible(false);
-    menu.findItem(R.id.action_demo).setVisible(false);
   }
 
   /**
@@ -197,26 +201,48 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
     return false;
   }
 
+  /**
+   * Check if the given url is a short url.
+   *
+   * @param url The url that will be tested to see if it is short
+   * @return The value that indicates if the given url is short
+   */
+  private static boolean isShortUrl(String url) {
+    return url.startsWith("http://goo.gl/") || url.startsWith("https://goo.gl/");
+  }
+
   public void onBeaconConfigReadUrlComplete(ConfigUriBeacon uriBeacon, int status) {
     if (status != BluetoothGatt.GATT_SUCCESS) {
       Log.e(TAG, "onUriBeaconRead - error " + status);
-    } else {
-      String url = "";
-      if (uriBeacon != null) {
-        url = uriBeacon.getUriString();
-        Log.d(TAG, "onReadUrlComplete" + "  url:  " + url);
-        if (UrlShortener.isShortUrl(url)) {
-          url = UrlShortener.lengthenShortUrl(url);
-        }
-      }
-      else {
-        Toast.makeText(getActivity(), R.string.config_url_read_error, Toast.LENGTH_SHORT).show();
-      }
-      // Update the url edit text field with the given url
-      mEditCardUrl.setText(url);
-      // Show the beacon configuration card
-      showConfigurableBeaconCard();
+      return;
     }
+
+    if (uriBeacon == null) {
+      Toast.makeText(getActivity(), R.string.config_url_read_error, Toast.LENGTH_SHORT).show();
+      setEditCardUrl("");
+      return;
+    }
+
+    final String url = uriBeacon.getUriString();
+    Log.d(TAG, "onReadUrlComplete" + "  url:  " + url);
+    if (!isShortUrl(url)) {
+      setEditCardUrl(url);
+    }
+
+    // Create the callback object to set the url
+    PwsClient.ResolveScanCallback resolveScanCallback = new PwsClient.ResolveScanCallback() {
+      @Override
+      public void onUrlMetadataReceived(PwoMetadata pwoMetadata){
+        setEditCardUrl(pwoMetadata.urlMetadata.siteUrl);
+      }
+
+      @Override
+      public void onUrlMetadataAbsent(PwoMetadata pwoMetadata){
+        setEditCardUrl(url);
+      }
+    };
+    PwoMetadata pwoMetadata = new PwoMetadata(url, 0);
+    PwsClient.getInstance(getActivity()).findUrlMetadata(pwoMetadata, resolveScanCallback, TAG);
   }
 
   public void onBeaconConfigWriteUrlComplete(final int status) {
@@ -266,17 +292,16 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
     int txPower = scanResult.getScanRecord().getTxPowerLevel();
     mRegionResolver.onUpdate(address, rxPower, txPower);
     final String nearestAddress = mRegionResolver.getNearestAddress();
-    // TODO: re-implement nearest address methodology once ranging bug is fixed
+    // TODO(?): re-implement nearest address methodology once ranging bug is fixed
     // When the current sighting comes from the nearest device...
-    //if (address.equals(nearestAddress)) {
-    if (true) {
+    // Remove the `|| true`
+    if (address.equals(nearestAddress) || true) {
       // Stopping the scan in this thread is important for responsiveness
       scanLeDevice(false);
-      mUriBeaconConfig = new UriBeaconConfig(getActivity(), new UriBeaconConfigCallback(), filteredUuid);
-      if (mUriBeaconConfig != null) {
-        mNearestDevice = scanResult.getDevice();
-        mUriBeaconConfig.connectUriBeacon(mNearestDevice);
-      }
+      mUriBeaconConfig = new UriBeaconConfig(getActivity(), new UriBeaconConfigCallback(),
+                                             filteredUuid);
+      mNearestDevice = scanResult.getDevice();
+      mUriBeaconConfig.connectUriBeacon(mNearestDevice);
     } else {
       mNearestDevice = null;
     }
@@ -296,21 +321,45 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
   }
 
   /**
-   * Hide the software keyboard
+   * Hide the software keyboard.
    */
   private void hideSoftKeyboard() {
-    InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+    InputMethodManager imm =
+        (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
     imm.hideSoftInputFromWindow(mEditCardUrl.getWindowToken(), 0);
   }
 
   /**
-   * Show the card that displays the address and url
-   * of the currently-being-configured beacon
+   * Show the card that displays the address and url of the currently-being-configured beacon.
    */
   private void showConfigurableBeaconCard() {
     mEditCard.setVisibility(View.VISIBLE);
     Animation animation = AnimationUtils.loadAnimation(getActivity(), R.anim.fade_in_and_slide_up);
     mEditCard.startAnimation(animation);
+  }
+
+  public void setEditCardUrl(String url) {
+    // Update the url edit text field with the given url
+    mEditCardUrl.setText(url);
+    // Show the beacon configuration card
+    showConfigurableBeaconCard();
+  }
+
+  /**
+   * Write a beacon url to the beacon.
+   */
+  private void setUriBeaconUrl(String url) {
+    try {
+      // Note: setting txPower here only really updates txPower for v1 beacons
+      ConfigUriBeacon configUriBeacon = new ConfigUriBeacon.Builder()
+          .txPowerLevel(TX_POWER_DEFAULT)
+          .uriString(url)
+          .build();
+      mUriBeaconConfig.writeUriBeacon(configUriBeacon);
+    } catch (URISyntaxException e) {
+      Log.e(TAG, "setUriBeaconUrl error: " + e);
+      Toast.makeText(getActivity(), R.string.config_url_error, Toast.LENGTH_SHORT).show();
+    }
   }
 
   /**
@@ -327,26 +376,22 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
     if (!URLUtil.isNetworkUrl(url)) {
       url = "http://" + url;
     }
+    // Create the callback object to set the url
+    PwsClient.ShortenUrlCallback urlSetter = new PwsClient.ShortenUrlCallback() {
+      @Override
+      public void onUrlShortened(String newUrl) {
+        setUriBeaconUrl(newUrl);
+      }
+      @Override
+      public void onError(String oldUrl) {
+        Toast.makeText(getActivity(), R.string.url_shortening_error, Toast.LENGTH_SHORT).show();
+      }
+    };
     // Shorten the url if necessary
     if (ConfigUriBeacon.uriLength(url) > ConfigUriBeacon.MAX_URI_LENGTH) {
-      url = UrlShortener.shortenUrl(url);
-      // If url shortening failed
-      if (url == null) {
-        Toast.makeText(getActivity(), R.string.url_shortening_error, Toast.LENGTH_SHORT).show();
-        return;
-      }
-    }
-    // Write the url to the device
-    try {
-      // Note: setting txPower here only really updates txPower for v1 beacons
-      ConfigUriBeacon configUriBeacon = new ConfigUriBeacon.Builder()
-          .txPowerLevel(TX_POWER_DEFAULT)
-          .uriString(url)
-          .build();
-      mUriBeaconConfig.writeUriBeacon(configUriBeacon);
-    } catch (URISyntaxException e) {
-      e.printStackTrace();
-      Toast.makeText(getActivity(), R.string.config_url_error, Toast.LENGTH_SHORT).show();
+      PwsClient.getInstance(getActivity()).shortenUrl(url, urlSetter, TAG);
+    } else {
+      setUriBeaconUrl(url);
     }
   }
 
@@ -359,7 +404,8 @@ public class BeaconConfigFragment extends Fragment implements TextView.OnEditorA
       ScanRecord scanRecord = ScanRecord.parseFromBytes(scanBytes);
       ParcelUuid filteredUuid = leScanMatches(scanRecord);
       if (filteredUuid != null) {
-        final ScanResult scanResult = new ScanResult(device, scanRecord, rssi, SystemClock.elapsedRealtimeNanos());
+        final ScanResult scanResult = new ScanResult(device, scanRecord, rssi,
+                                                     SystemClock.elapsedRealtimeNanos());
         handleFoundDevice(scanResult, filteredUuid);
       }
     }

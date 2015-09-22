@@ -20,11 +20,11 @@
 
 #import "PWBeacon.h"
 #import "PWMetadataRequest.h"
-#import "PWURLShortener.h"
 
-@interface PWBeaconManager () <PWMetadataRequestDelegate,
-                               NSNetServiceBrowserDelegate,
-                               NSNetServiceDelegate>
+#define DISCOVERY_DELAY_KEY @"discoveryDelay"
+
+@interface PWBeaconManager ()<PWMetadataRequestDelegate,
+                              NSNetServiceBrowserDelegate, NSNetServiceDelegate>
 
 @end
 
@@ -55,6 +55,8 @@
   NSMutableDictionary* _discoveredNetServicesURLs;
   // Names of the discovered services.
   NSMutableSet* _netServicesNames;
+  NSTimeInterval _startTime;
+  NSMutableArray* _pendingBeaconsInfos;
 }
 
 - (id)init {
@@ -63,12 +65,12 @@
     return nil;
   }
   _beaconsDict = [NSMutableDictionary dictionary];
-  _scanner = [[UBUriBeaconScanner alloc] init];
   _changeBlocks = [NSMutableArray array];
   _configurationChangeBlocks = [NSMutableArray array];
   _requests = [NSMutableArray array];
   _pendingURLRequest = [NSMutableSet set];
   _pendingNetServices = [[NSMutableArray alloc] init];
+  _pendingBeaconsInfos = [[NSMutableArray alloc] init];
   _stableMode = YES;
   return self;
 }
@@ -77,9 +79,9 @@
   static dispatch_once_t onceToken;
   static PWBeaconManager* instance = nil;
   dispatch_once(&onceToken, ^{
-      if (instance == nil) {
-        instance = [[PWBeaconManager alloc] init];
-      }
+    if (instance == nil) {
+      instance = [[PWBeaconManager alloc] init];
+    }
   });
   return instance;
 }
@@ -113,19 +115,25 @@
 }
 
 - (void)start {
+  _startTime = [NSDate timeIntervalSinceReferenceDate];
   _started = YES;
   PWBeaconManager* __weak weakSelf = self;
-  _scanner = [[UBUriBeaconScanner alloc] init];
+#if TODAY_EXTENSION
+  _scanner = [[UBUriBeaconScanner alloc] initWithApplication:nil];
+#else
+  _scanner = [[UBUriBeaconScanner alloc]
+      initWithApplication:[UIApplication sharedApplication]];
+#endif
   [_scanner startScanningWithUpdateBlock:^{
-      PWBeaconManager* strongSelf = weakSelf;
-      [strongSelf _updateBeacons];
+    PWBeaconManager* strongSelf = weakSelf;
+    [strongSelf _updateBeacons];
   }];
   _httpServiceBrowser = [[NSNetServiceBrowser alloc] init];
   [_httpServiceBrowser setDelegate:self];
   _httpsServiceBrowser = [[NSNetServiceBrowser alloc] init];
   [_httpsServiceBrowser setDelegate:self];
-  [_httpServiceBrowser searchForServicesOfType:@"_http._tcp." inDomain:nil];
-  [_httpsServiceBrowser searchForServicesOfType:@"_https._tcp." inDomain:nil];
+  [_httpServiceBrowser searchForServicesOfType:@"_http._tcp." inDomain:@""];
+  [_httpsServiceBrowser searchForServicesOfType:@"_https._tcp." inDomain:@""];
   [_pendingNetServices removeAllObjects];
   _discoveredNetServicesURLs = [NSMutableDictionary dictionary];
   _netServicesNames = [NSMutableSet set];
@@ -233,6 +241,13 @@
       // Request metadata of a new beacon.
       UBUriBeacon* uriBeacon =
           [[UBUriBeacon alloc] initWithURI:url txPowerLevel:0];
+      NSTimeInterval currentTime = [NSDate timeIntervalSinceReferenceDate];
+      NSTimeInterval discoveryDelay = currentTime - _startTime;
+      NSMutableDictionary* pendingBeaconInfo =
+          [[NSMutableDictionary alloc] init];
+      pendingBeaconInfo[DISCOVERY_DELAY_KEY] =
+          [NSNumber numberWithDouble:discoveryDelay];
+      [_pendingBeaconsInfos addObject:pendingBeaconInfo];
       PWMetadataRequest* request = [[PWMetadataRequest alloc] init];
       [request setUriBeacons:@[ uriBeacon ]];
       [request setDelegate:self];
@@ -267,6 +282,9 @@
     if ([uriBeacon URI] == nil) {
       continue;
     }
+    if ([uriBeacon RSSI] == 127) {
+      continue;
+    }
     if (!([[[[uriBeacon URI] scheme] lowercaseString]
               isEqualToString:@"http"] ||
           [[[[uriBeacon URI] scheme] lowercaseString]
@@ -277,6 +295,13 @@
     if (beacon == nil) {
       if (![_pendingURLRequest containsObject:[uriBeacon URI]]) {
         // Request metadata of a new beacon.
+        NSTimeInterval currentTime = [NSDate timeIntervalSinceReferenceDate];
+        NSTimeInterval discoveryDelay = currentTime - _startTime;
+        NSMutableDictionary* pendingBeaconInfo =
+            [[NSMutableDictionary alloc] init];
+        pendingBeaconInfo[DISCOVERY_DELAY_KEY] =
+            [NSNumber numberWithDouble:discoveryDelay];
+        [_pendingBeaconsInfos addObject:pendingBeaconInfo];
         PWMetadataRequest* request = [[PWMetadataRequest alloc] init];
         [request setUriBeacons:@[ uriBeacon ]];
         [request setDelegate:self];
@@ -306,16 +331,21 @@
   } else {
     beacon = [[PWBeacon alloc] initWithUriBeacon:uriBeacon info:nil];
   }
-  [PWURLShortener
-       expandURL:[beacon URL]
-      completion:^(NSError* error, NSURL* resultURL) {
-          // Add beacon to the results.
-          [beacon setURL:resultURL];
-          [_beaconsDict setObject:beacon forKey:[[beacon uriBeacon] URI]];
-          [_pendingURLRequest removeObject:[uriBeacon URI]];
-          [_requests removeObject:request];
-          [self _notify];
-      }];
+
+  [_beaconsDict setObject:beacon forKey:[[beacon uriBeacon] URI]];
+  NSUInteger idx = [_requests indexOfObject:request];
+  if (idx != NSNotFound) {
+    NSDictionary* beaconInfo = [_pendingBeaconsInfos objectAtIndex:idx];
+    NSTimeInterval discoveryDelay =
+        [beaconInfo[DISCOVERY_DELAY_KEY] doubleValue];
+    NSTimeInterval requestDelay = [request delay];
+    [beacon setDiscoveryDelay:discoveryDelay];
+    [beacon setRequestDelay:requestDelay];
+    [_pendingURLRequest removeObject:[uriBeacon URI]];
+    [_pendingBeaconsInfos removeObjectAtIndex:idx];
+    [_requests removeObjectAtIndex:idx];
+  }
+  [self _notify];
 }
 
 // Remove expired beacons.
@@ -394,6 +424,10 @@
     [beacons addObject:beacon];
   }
   return beacons;
+}
+
+- (NSTimeInterval)startTime {
+  return _startTime;
 }
 
 @end

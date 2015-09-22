@@ -22,14 +22,15 @@ import android.net.nsd.NsdServiceInfo;
 import android.util.Log;
 import android.webkit.URLUtil;
 
-class MdnsUrlDiscoverer {
+class MdnsPwoDiscoverer extends PwoDiscoverer {
 
-  private static final String TAG = "MdnsUrlDiscoverer";
+  private static final String TAG = "MdnsPwoDiscoverer";
   NsdManager.DiscoveryListener mDiscoveryListener = new NsdManager.DiscoveryListener() {
 
     @Override
     public void onDiscoveryStarted(String regType) {
       Log.d(TAG, "Service discovery started");
+      mState = State.STARTED;
     }
 
     @Override
@@ -37,7 +38,9 @@ class MdnsUrlDiscoverer {
       Log.d(TAG, "Service discovery success" + service);
       String name = service.getServiceName();
       if (URLUtil.isNetworkUrl(name)) {
-        mMdnsUrlDiscovererCallback.onMdnsUrlFound(name);
+        PwoMetadata pwoMetadata = createPwoMetadata(name);
+        pwoMetadata.isPublic = false;
+        reportPwo(pwoMetadata);
       }
     }
 
@@ -49,6 +52,11 @@ class MdnsUrlDiscoverer {
     @Override
     public void onDiscoveryStopped(String serviceType) {
       Log.i(TAG, "Discovery stopped: " + serviceType);
+      mState = State.STOPPED;
+      if (toRestart) {
+        toRestart = false;
+        startScan();
+      }
     }
 
     @Override
@@ -65,22 +73,41 @@ class MdnsUrlDiscoverer {
   };
   private static final String MDNS_SERVICE_TYPE = "_http._tcp.";
   private NsdManager mNsdManager;
-  private MdnsUrlDiscovererCallback mMdnsUrlDiscovererCallback;
+  private enum State {
+    STOPPED,
+    WAITING,
+    STARTED,
+  }
+  private State mState;
+  private boolean toRestart;
 
-  public MdnsUrlDiscoverer(Context context, MdnsUrlDiscovererCallback mdnsUrlDiscovererCallback) {
-    mMdnsUrlDiscovererCallback = mdnsUrlDiscovererCallback;
+  public MdnsPwoDiscoverer(Context context) {
     mNsdManager = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
+    mState = State.STOPPED;
+    toRestart = false;
   }
 
-  public void startScanning() {
+  @Override
+  public synchronized void startScanImpl() {
+    if (mState != State.STOPPED) {
+      return;
+    }
+    mState = State.WAITING;
     mNsdManager.discoverServices(MDNS_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, mDiscoveryListener);
   }
 
-  public void stopScanning() {
+  @Override
+  public synchronized void stopScanImpl() {
+    if (mState != State.STARTED) {
+      return;
+    }
+    mState = State.WAITING;
     mNsdManager.stopServiceDiscovery(mDiscoveryListener);
   }
 
-  public interface MdnsUrlDiscovererCallback {
-    public void onMdnsUrlFound(String url);
+  @Override
+  public synchronized void restartScan() {
+    toRestart = true;
+    stopScan();
   }
 }

@@ -162,7 +162,7 @@ typedef struct {
   _beacon = beacon;
 
   [_titleLabel setText:[[self beacon] title]];
-  [_urlLabel setText:[[[self beacon] URL] absoluteString]];
+  [_urlLabel setText:[[[self beacon] displayURL] absoluteString]];
   [_descriptionLabel setText:snippetForBeacon([self beacon])];
 #if !TODAY_EXTENSION
   if ([[self beacon] iconURL] == nil) {
@@ -202,13 +202,13 @@ static NSString *snippetForBeacon(PWBeacon *beacon) {
   if ([[NSUserDefaults standardUserDefaults] boolForKey:@"DebugMode"]) {
     return [NSString
         stringWithFormat:
-            @"[%@ initial:%@ rt:%@ rssi:%i tx:%i dist:%.2g score: %.2g] %@",
-            [beacon sortByRegion] ? @"fast" : @"slow", [beacon debugRegionName],
-            [beacon debugUriRegionName], (int)[[beacon uriBeacon] RSSI],
+            @"[discovery:%g request:%g rssi:%i tx:%i dist:%.2g rank: %.2g] %@",
+            [beacon discoveryDelay], [beacon requestDelay],
+            (int)[[beacon uriBeacon] RSSI],
             (int)[[beacon uriBeacon] txPowerLevel],
             distanceFromRSSI([[beacon uriBeacon] txPowerLevel],
                              [[beacon uriBeacon] RSSI]),
-            [beacon score], [beacon snippet] != nil ? [beacon snippet] : @""];
+            [beacon rank], [beacon snippet] != nil ? [beacon snippet] : @""];
   } else {
     return [beacon snippet];
   }

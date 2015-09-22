@@ -17,20 +17,20 @@
 
 package org.physical_web.physicalweb;
 
+import android.annotation.SuppressLint;
 import android.app.Fragment;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.View;
 import android.view.ViewGroup;
-import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.TextView;
 
-import org.physical_web.physicalweb.BuildConfig;
-import org.physical_web.physicalweb.R;
-
+/**
+ * The fragment that displays info about the app.
+ */
 public class AboutFragment extends Fragment {
 
   @SuppressWarnings("WeakerAccess")
@@ -50,16 +50,17 @@ public class AboutFragment extends Fragment {
     }
   }
 
+  @SuppressLint("SetJavaScriptEnabled")
   private void initializeWebView() {
     WebView webView = (WebView) getActivity().findViewById(R.id.about_webview);
     webView.getSettings().setJavaScriptEnabled(true);
-    webView.getSettings().setRenderPriority(WebSettings.RenderPriority.HIGH);
     webView.setWebViewClient(new WebViewClient());
     webView.loadUrl(getString(R.string.url_getting_started));
   }
 
   @Override
-  public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+  public View onCreateView(LayoutInflater inflater, ViewGroup container,
+                           Bundle savedInstanceState) {
     setHasOptionsMenu(true);
     getActivity().getActionBar().setDisplayHomeAsUpEnabled(true);
     return inflater.inflate(R.layout.fragment_about, container, false);
@@ -79,7 +80,6 @@ public class AboutFragment extends Fragment {
     super.onPrepareOptionsMenu(menu);
     menu.findItem(R.id.action_config).setVisible(false);
     menu.findItem(R.id.action_about).setVisible(false);
-    menu.findItem(R.id.action_demo).setVisible(false);
   }
 
 }

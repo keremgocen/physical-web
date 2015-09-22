@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from urllib import unquote_plus
 import helpers
 import json
 import logging
@@ -26,8 +27,19 @@ class Index(webapp2.RequestHandler):
     def get(self):
         self.response.out.write('')
 
+    def head(self):
+        pass
+
+################################################################################
+
 class GoUrl(webapp2.RequestHandler):
     def get(self):
+        return self._redirect()
+
+    def head(self):
+        return self._redirect()
+
+    def _redirect(self):
         url = self.request.get('url')
         url = url.encode('ascii', 'ignore')
         self.redirect(url)
@@ -37,9 +49,19 @@ class GoUrl(webapp2.RequestHandler):
 class RefreshUrl(webapp2.RequestHandler):
     def post(self):
         url = self.request.get('url')
-        #logging.info('refreshing ' + url)
-        siteInfo = models.SiteInformation.get_by_id(url)
-        siteInfo = helpers.FetchAndStoreUrl(siteInfo, url)
+        helpers.RefreshUrl(url)
+
+################################################################################
+
+class FaviconUrl(webapp2.RequestHandler):
+    def get(self):
+        url = unquote_plus(self.request.get('url'))
+        response = helpers.FaviconUrl(url)
+        if response:
+            self.response.headers['Content-Type'] = response.headers['Content-Type']
+            self.response.write(response.content)
+        else:
+            self.error('404')
 
 ################################################################################
 
@@ -53,10 +75,8 @@ class ResolveScan(webapp2.RequestHandler):
         except:
             objects = []
 
-        metadata_output = helpers.BuildResponse(objects)
-        output = {
-          'metadata': metadata_output
-        }
+        output = helpers.BuildResponse(objects)
+
         self.response.headers['Content-Type'] = 'application/json'
         json_data = json.dumps(output);
         self.response.write(json_data)
@@ -71,13 +91,14 @@ class DemoMetadata(webapp2.RequestHandler):
             {'url': 'http://en.wikipedia.org/wiki/Le_D%C3%A9jeuner_sur_l%E2%80%99herbe'},
             {'url': 'http://sfmoma.org'}
         ]
-        metadata_output = helpers.BuildResponse(objects)
-        output = {
-          'metadata': metadata_output
-        }
+        output = helpers.BuildResponse(objects)
+
         self.response.headers['Content-Type'] = 'application/json'
         json_data = json.dumps(output);
         self.response.write(json_data)
+
+    def head(self):
+        pass
 
 ################################################################################
 
@@ -85,6 +106,7 @@ app = webapp2.WSGIApplication([
     ('/', Index),
     ('/resolve-scan', ResolveScan),
     ('/refresh-url', RefreshUrl),
+    ('/favicon', FaviconUrl),
     ('/go', GoUrl),
     ('/demo', DemoMetadata)
 ], debug=True)

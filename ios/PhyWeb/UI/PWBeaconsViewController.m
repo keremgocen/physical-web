@@ -28,8 +28,9 @@
 #import "PWPlaceholderView.h"
 #import "PWSettingsViewController.h"
 #import "PWSimpleWebViewController.h"
+#import "PWChartViewController.h"
 
-@interface PWBeaconsViewController () <
+@interface PWBeaconsViewController ()<
     UITableViewDataSource, UITableViewDelegate, UITextViewDelegate,
     CBCentralManagerDelegate, PWMetadataRequestDelegate,
     PWSimpleWebViewControllerDelegate>
@@ -59,8 +60,9 @@
                          bundle:(NSBundle *)nibBundleOrNil {
   self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil];
   _firstUpdate = YES;
-  [[PWBeaconManager sharedManager]
-      registerChangeBlock:^{ [self _updateViewAfterDelay]; }];
+  [[PWBeaconManager sharedManager] registerChangeBlock:^{
+    [self _updateViewAfterDelay];
+  }];
 
   [[NSNotificationCenter defaultCenter]
       addObserver:self
@@ -89,9 +91,10 @@
   [_tableView setSeparatorStyle:UITableViewCellSeparatorStyleNone];
   [_tableView setScrollsToTop:YES];
   PWBeaconsViewController *__weak weakSelf = self;
-  [_tableView
-      addPullToRefreshWithActionHandler:^{ [weakSelf _performPullToRefresh]; }];
-  [self viewWillTransitionToSize:bounds.size withTransitionCoordinator:nil];
+  [_tableView addPullToRefreshWithActionHandler:^{
+    [weakSelf _performPullToRefresh];
+  }];
+  [self _updateLayoutForSize:bounds.size];
   [[self view] addSubview:_tableView];
 
   _placeholderView = [[PWPlaceholderView alloc] initWithFrame:CGRectZero];
@@ -167,7 +170,7 @@
 }
 
 - (void)simpleWebViewControllerProceedPressed:
-            (PWSimpleWebViewController *)controller {
+    (PWSimpleWebViewController *)controller {
   [[NSUserDefaults standardUserDefaults] setBool:YES
                                           forKey:@"GettingStartedDialogShown"];
   [[NSUserDefaults standardUserDefaults] synchronize];
@@ -178,6 +181,10 @@
        withTransitionCoordinator:
            (id<UIViewControllerTransitionCoordinator>)coordinator {
   [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+  [self _updateLayoutForSize:size];
+}
+
+- (void)_updateLayoutForSize:(CGSize)size {
   if (size.width > size.height) {
     [_tableView setContentInset:UIEdgeInsetsMake(0, 0, 0, 0)];
   } else {
@@ -325,79 +332,29 @@
 
 // Sort results by RSSI value.
 - (void)_sort {
-  BOOL stableMode = [[PWBeaconManager sharedManager] isStableMode];
-
+  for (PWBeacon *beacon in _beacons) {
+    if (![beacon hasRank]) {
+      [beacon setHasRank:YES];
+      [beacon setRank:1000];
+    }
+  }
   [_beacons sortUsingComparator:^NSComparisonResult(id obj1, id obj2) {
-      PWBeacon *beacon1 = obj1;
-      PWBeacon *beacon2 = obj2;
-      if (stableMode) {
-        if ([beacon1 hasScore]) {
-          PWBeacon *beacon1 = obj1;
-          PWBeacon *beacon2 = obj2;
-          double diff = [beacon1 score] - [beacon2 score];
-          if (diff > 0) {
-            return NSOrderedAscending;
-          } else if (diff < 0) {
-            return NSOrderedDescending;
-          } else {
-            NSComparisonResult result =
-            [[beacon1 title] caseInsensitiveCompare:[beacon2 title]];
-            if (result != NSOrderedSame) {
-              return result;
-            }
-            return [[[beacon1 URL] absoluteString]
-                    caseInsensitiveCompare:[[beacon2 URL] absoluteString]];
-          }
-        }
-        else if ([beacon1 sortByRegion] && [beacon2 sortByRegion]) {
-          NSInteger regionDifference =
-              (NSInteger)[beacon1 region] - (NSInteger)[beacon2 region];
-          if (regionDifference > 0) {
-            return NSOrderedDescending;
-          } else if (regionDifference < 0) {
-            return NSOrderedAscending;
-          } else {
-            NSComparisonResult result =
-                [[beacon1 title] caseInsensitiveCompare:[beacon2 title]];
-            if (result != NSOrderedSame) {
-              return result;
-            }
-            return [[[beacon1 URL] absoluteString]
-                caseInsensitiveCompare:[[beacon2 URL] absoluteString]];
-          }
-        } else if ([beacon1 sortByRegion]) {
-          return NSOrderedAscending;
-        } else if ([beacon2 sortByRegion]) {
-          return NSOrderedDescending;
-        } else {
-          NSComparisonResult result = [[beacon1 date] compare:[beacon2 date]];
-          if (result != NSOrderedSame) {
-            return result;
-          }
-          result = [[beacon1 title] caseInsensitiveCompare:[beacon2 title]];
-          if (result != NSOrderedSame) {
-            return result;
-          }
-          return [[[beacon1 URL] absoluteString]
-              caseInsensitiveCompare:[[beacon2 URL] absoluteString]];
-        }
-      } else {
-        NSInteger regionDifference = (NSInteger)[[beacon1 uriBeacon] region] -
-                                     (NSInteger)[[beacon2 uriBeacon] region];
-        if (regionDifference > 0) {
-          return NSOrderedDescending;
-        } else if (regionDifference < 0) {
-          return NSOrderedAscending;
-        } else {
-          NSComparisonResult result =
-              [[beacon1 title] caseInsensitiveCompare:[beacon2 title]];
-          if (result != NSOrderedSame) {
-            return result;
-          }
-          return [[[beacon1 URL] absoluteString]
-              caseInsensitiveCompare:[[beacon2 URL] absoluteString]];
-        }
+    PWBeacon *beacon1 = obj1;
+    PWBeacon *beacon2 = obj2;
+    double diff = [beacon1 rank] - [beacon2 rank];
+    if (diff > 0) {
+      return NSOrderedDescending;
+    } else if (diff < 0) {
+      return NSOrderedAscending;
+    } else {
+      NSComparisonResult result =
+          [[beacon1 title] caseInsensitiveCompare:[beacon2 title]];
+      if (result != NSOrderedSame) {
+        return result;
       }
+      return [[[beacon1 URL] absoluteString]
+          caseInsensitiveCompare:[[beacon2 URL] absoluteString]];
+    }
   }];
 }
 
@@ -416,7 +373,9 @@
   _canShowPlaceholder = YES;
   [_placeholderView setShowLabel:YES];
   [UIView animateWithDuration:0.25
-                   animations:^{ [_showDemoBeaconsButton setAlpha:1.0]; }];
+                   animations:^{
+                     [_showDemoBeaconsButton setAlpha:1.0];
+                   }];
   [self _reloadData];
 
   CGRect bounds = [_placeholderView bounds];
@@ -459,7 +418,7 @@
 }
 
 - (NSInteger)tableView:(UITableView *)tableView
-    numberOfRowsInSection:(NSInteger)section {
+ numberOfRowsInSection:(NSInteger)section {
   return [_beacons count];
 }
 
@@ -483,19 +442,34 @@
 
 - (void)tableView:(UITableView *)tableView
     didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-  PWBeacon *beacon = [_beacons objectAtIndex:[indexPath row]];
-  NSURL *url = [[beacon uriBeacon] URI];
-  NSString *unescaped = [url absoluteString];
-  NSString *escapedString =
-      [unescaped stringByAddingPercentEncodingWithAllowedCharacters:
-                     [NSCharacterSet URLHostAllowedCharacterSet]];
-  NSString *goURLString =
-      [NSString stringWithFormat:@"http://" METADATA_SERVER_HOSTNAME @"/go?url=%@",
-                                 escapedString];
-  NSURL *goURL = [NSURL URLWithString:goURLString];
-  [[UIApplication sharedApplication] openURL:goURL];
+  if ([[NSUserDefaults standardUserDefaults] boolForKey:@"DebugMode"]) {
+    PWChartViewController *detailController =
+        [[PWChartViewController alloc] initWithNibName:nil bundle:nil];
+    PWBeacon *beacon = [_beacons objectAtIndex:[indexPath row]];
+    NSURL *url = [beacon displayURL];
+    [detailController setURL:url];
+    UINavigationController *navigationController =
+        [[UINavigationController alloc]
+            initWithRootViewController:detailController];
+    [self presentViewController:navigationController
+                       animated:YES
+                     completion:nil];
+    [_tableView deselectRowAtIndexPath:indexPath animated:YES];
+  } else {
+    PWBeacon *beacon = [_beacons objectAtIndex:[indexPath row]];
+    NSURL *url = [[beacon uriBeacon] URI];
+    NSString *unescaped = [url absoluteString];
+    NSString *escapedString =
+        [unescaped stringByAddingPercentEncodingWithAllowedCharacters:
+                       [NSCharacterSet URLHostAllowedCharacterSet]];
+    NSString *goURLString =
+        [NSString stringWithFormat:@"http://%@/go?url=%@",
+                                   [PWMetadataRequest hostname], escapedString];
+    NSURL *goURL = [NSURL URLWithString:goURLString];
+    [[UIApplication sharedApplication] openURL:goURL];
 
-  [_tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [_tableView deselectRowAtIndexPath:indexPath animated:YES];
+  }
 }
 
 #pragma mark scroll view delegate method
@@ -504,7 +478,9 @@
   CGFloat alphaValue = [scrollView contentOffset].y > 0 ? 1.0 : 0.0;
   if ([_gradientView alpha] != alphaValue) {
     [UIView animateWithDuration:0.25
-                     animations:^{ [_gradientView setAlpha:alphaValue]; }];
+                     animations:^{
+                       [_gradientView setAlpha:alphaValue];
+                     }];
   }
 }
 

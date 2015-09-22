@@ -16,44 +16,38 @@
 
 package org.physical_web.physicalweb;
 
+import org.physical_web.physicalweb.PwoMetadata.BleMetadata;
+import org.physical_web.physicalweb.PwoMetadata.UrlMetadata;
+
+import android.animation.Animator;
+import android.animation.Animator.AnimatorListener;
 import android.animation.ObjectAnimator;
 import android.annotation.SuppressLint;
 import android.app.ListFragment;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.graphics.drawable.AnimationDrawable;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.ParcelUuid;
-import android.os.Parcelable;
-import android.os.SystemClock;
+import android.os.IBinder;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.animation.DecelerateInterpolator;
-import android.webkit.URLUtil;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.TextView;
-import android.widget.Toast;
-
-import org.uribeacon.beacon.UriBeacon;
-import org.uribeacon.scan.compat.ScanRecord;
-import org.uribeacon.scan.compat.ScanResult;
-import org.uribeacon.scan.util.RangingUtils;
-import org.uribeacon.scan.util.RegionResolver;
 
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -67,106 +61,153 @@ import java.util.concurrent.TimeUnit;
  * the browser and point that browser
  * to the given list items url.
  */
-public class NearbyBeaconsFragment extends ListFragment implements MetadataResolver.MetadataResolverCallback, SwipeRefreshWidget.OnRefreshListener, MdnsUrlDiscoverer.MdnsUrlDiscovererCallback,SsdpUrlDiscoverer.SsdpUrlDiscovererCallback {
+public class NearbyBeaconsFragment extends ListFragment
+                                   implements PwoDiscoveryService.PwoResponseCallback,
+                                              SwipeRefreshWidget.OnRefreshListener {
 
   private static final String TAG = "NearbyBeaconsFragment";
-  private static final long SCAN_TIME_MILLIS = TimeUnit.SECONDS.toMillis(3);
-  private final BluetoothAdapter.LeScanCallback mLeScanCallback = new LeScanCallback();
-  private BluetoothAdapter mBluetoothAdapter;
-  private HashMap<String, MetadataResolver.UrlMetadata> mUrlToUrlMetadata;
+  private static final long FIRST_SCAN_TIME_MILLIS = TimeUnit.SECONDS.toMillis(2);
+  private static final long SECOND_SCAN_TIME_MILLIS = TimeUnit.SECONDS.toMillis(5);
+  private static final long THIRD_SCAN_TIME_MILLIS = TimeUnit.SECONDS.toMillis(10);
+  private HashMap<String, PwoMetadata> mUrlToPwoMetadata;
+  private List<PwoMetadata> mPwoMetadataQueue;
+  private TextView mScanningAnimationTextView;
   private AnimationDrawable mScanningAnimationDrawable;
-  private boolean mIsDemoMode;
-  private boolean mIsScanRunning;
   private Handler mHandler;
   private NearbyBeaconsAdapter mNearbyDeviceAdapter;
-  private Parcelable[] mScanFilterUuids;
   private SwipeRefreshWidget mSwipeRefreshWidget;
-  private MdnsUrlDiscoverer mMdnsUrlDiscoverer;
-  private SsdpUrlDiscoverer mSsdpUrlDiscoverer;
-  private boolean mDebugRangingViewEnabled = false;
-  // Run when the SCAN_TIME_MILLIS has elapsed.
-  private Runnable mScanTimeout = new Runnable() {
+  private boolean mDebugViewEnabled = false;
+  private boolean mSecondScanComplete;
+
+  // The display of gathered urls happens as follows
+  // 0. Begin scan
+  // 1. Sort and show all urls (mFirstScanTimeout)
+  // 2. Sort and show all new urls beneath the first set (mSecondScanTimeout)
+  // 3. Show each new url at bottom of list as it comes in
+  // 4. Stop scanning (mThirdScanTimeout)
+
+  // Run when the FIRST_SCAN_MILLIS has elapsed.
+  private Runnable mFirstScanTimeout = new Runnable() {
     @Override
     public void run() {
-      mScanningAnimationDrawable.stop();
-      scanLeDevice(false);
-      mMdnsUrlDiscoverer.stopScanning();
-      mSsdpUrlDiscoverer.stopScanning();
-      mNearbyDeviceAdapter.sortDevices();
-      mNearbyDeviceAdapter.notifyDataSetChanged();
-      fadeInListView();
+      Log.d(TAG, "running first scan timeout");
+      if (!mPwoMetadataQueue.isEmpty()) {
+        emptyPwoMetadataQueue();
+        showListView();
+      }
     }
   };
-  private AdapterView.OnItemLongClickListener mAdapterViewItemLongClickListener = new AdapterView.OnItemLongClickListener() {
+
+  // Run when the SECOND_SCAN_MILLIS has elapsed.
+  private Runnable mSecondScanTimeout = new Runnable() {
+    @Override
+    public void run() {
+      Log.d(TAG, "running second scan timeout");
+      emptyPwoMetadataQueue();
+      showListView();
+      mSecondScanComplete = true;
+    }
+  };
+
+  // Run when the THIRD_SCAN_MILLIS has elapsed.
+  private Runnable mThirdScanTimeout = new Runnable() {
+    @Override
+    public void run() {
+      Log.d(TAG, "running third scan timeout");
+      mDiscoveryServiceConnection.disconnect();
+    }
+  };
+
+  private AdapterView.OnItemLongClickListener mAdapterViewItemLongClickListener =
+      new AdapterView.OnItemLongClickListener() {
     public boolean onItemLongClick(AdapterView<?> av, View v, int position, long id) {
-      mDebugRangingViewEnabled = !mDebugRangingViewEnabled;
+      mDebugViewEnabled = !mDebugViewEnabled;
       mNearbyDeviceAdapter.notifyDataSetChanged();
       return true;
     }
   };
 
-  public static NearbyBeaconsFragment newInstance(boolean isDemoMode) {
-    NearbyBeaconsFragment nearbyBeaconsFragment = new NearbyBeaconsFragment();
-    Bundle bundle = new Bundle();
-    bundle.putBoolean("isDemoMode", isDemoMode);
-    nearbyBeaconsFragment.setArguments(bundle);
-    return nearbyBeaconsFragment;
-  }
+  /**
+   * The connection to the service that discovers urls.
+   */
+  private class DiscoveryServiceConnection implements ServiceConnection {
+    private PwoDiscoveryService mDiscoveryService;
+    private boolean mRequestCachedPwos;
 
-  private static String generateMockBluetoothAddress(int hashCode) {
-    String mockAddress = "00:11";
-    for (int i = 0; i < 4; i++) {
-      mockAddress += String.format(":%02X", hashCode & 0xFF);
-      hashCode = hashCode >> 8;
+    @Override
+    public synchronized void onServiceConnected(ComponentName className, IBinder service) {
+      // Get the service
+      PwoDiscoveryService.LocalBinder localBinder = (PwoDiscoveryService.LocalBinder) service;
+      mDiscoveryService = localBinder.getServiceInstance();
+
+      // Start the scanning display
+      startScanningDisplay(mRequestCachedPwos ? mDiscoveryService.getScanStartTime()
+                                              : new Date().getTime(),
+                           mDiscoveryService.hasResults());
+
+      // Request the metadata
+      mDiscoveryService.requestPwoMetadata(NearbyBeaconsFragment.this, mRequestCachedPwos);
     }
-    return mockAddress;
+
+    @Override
+    public synchronized void onServiceDisconnected(ComponentName className) {
+      // onServiceDisconnected gets called when the connection is unintentionally disconnected,
+      // which should never happen for us since this is a local service
+      mDiscoveryService = null;
+    }
+
+    public synchronized void connect(boolean requestCachedPwos) {
+      if (mDiscoveryService != null) {
+        return;
+      }
+
+      mRequestCachedPwos = requestCachedPwos;
+      Intent intent = new Intent(getActivity(), PwoDiscoveryService.class);
+      getActivity().startService(intent);
+      getActivity().bindService(intent, this, Context.BIND_AUTO_CREATE);
+    }
+
+    public synchronized void disconnect() {
+      if (mDiscoveryService == null) {
+        return;
+      }
+
+      mDiscoveryService.removeCallbacks(NearbyBeaconsFragment.this);
+      mDiscoveryService = null;
+      getActivity().unbindService(this);
+      stopScanningDisplay();
+    }
+  }
+  private DiscoveryServiceConnection mDiscoveryServiceConnection = new DiscoveryServiceConnection();
+
+  public static NearbyBeaconsFragment newInstance() {
+    return new NearbyBeaconsFragment();
   }
 
   private void initialize(View rootView) {
     setHasOptionsMenu(true);
-    mUrlToUrlMetadata = new HashMap<>();
+    mUrlToPwoMetadata = new HashMap<>();
+    mPwoMetadataQueue = new ArrayList<>();
     mHandler = new Handler();
-    mScanFilterUuids = new ParcelUuid[]{UriBeacon.URI_SERVICE_UUID};
 
     mSwipeRefreshWidget = (SwipeRefreshWidget) rootView.findViewById(R.id.swipe_refresh_widget);
-    mSwipeRefreshWidget.setColorSchemeResources(R.color.swipe_refresh_widget_first_color, R.color.swipe_refresh_widget_second_color);
+    mSwipeRefreshWidget.setColorSchemeResources(R.color.swipe_refresh_widget_first_color,
+                                                R.color.swipe_refresh_widget_second_color);
     mSwipeRefreshWidget.setOnRefreshListener(this);
-
-    mMdnsUrlDiscoverer = new MdnsUrlDiscoverer(getActivity(), NearbyBeaconsFragment.this);
-    mSsdpUrlDiscoverer = new SsdpUrlDiscoverer(getActivity(), NearbyBeaconsFragment.this);
 
     getActivity().getActionBar().setTitle(R.string.title_nearby_beacons);
     mNearbyDeviceAdapter = new NearbyBeaconsAdapter();
     setListAdapter(mNearbyDeviceAdapter);
-    initializeScanningAnimation(rootView);
+    //Get the top drawable
+    mScanningAnimationTextView = (TextView) rootView.findViewById(android.R.id.empty);
+    mScanningAnimationDrawable =
+        (AnimationDrawable) mScanningAnimationTextView.getCompoundDrawables()[1];
     ListView listView = (ListView) rootView.findViewById(android.R.id.list);
     listView.setOnItemLongClickListener(mAdapterViewItemLongClickListener);
-
-    mIsDemoMode = getArguments().getBoolean("isDemoMode");
-    // Only scan for beacons when not in demo mode
-    if (mIsDemoMode) {
-      getActivity().getActionBar().setDisplayHomeAsUpEnabled(true);
-      MetadataResolver.findDemoUrlMetadata(getActivity(), NearbyBeaconsFragment.this);
-    } else {
-      initializeBluetooth();
-    }
   }
 
-  private void initializeBluetooth() {
-    // Initializes a Bluetooth adapter. For API version 18 and above,
-    // get a reference to BluetoothAdapter through BluetoothManager.
-    final BluetoothManager bluetoothManager = (BluetoothManager) getActivity().getSystemService(Context.BLUETOOTH_SERVICE);
-    mBluetoothAdapter = bluetoothManager.getAdapter();
-  }
-
-  private void initializeScanningAnimation(View rootView) {
-    TextView tv = (TextView) rootView.findViewById(android.R.id.empty);
-    //Get the top drawable
-    mScanningAnimationDrawable = (AnimationDrawable) tv.getCompoundDrawables()[1];
-    mScanningAnimationDrawable.start();
-  }
-
-  public View onCreateView(LayoutInflater layoutInflater, ViewGroup container, Bundle savedInstanceState) {
+  public View onCreateView(LayoutInflater layoutInflater, ViewGroup container,
+                           Bundle savedInstanceState) {
     View rootView = layoutInflater.inflate(R.layout.fragment_nearby_beacons, container, false);
     initialize(rootView);
     return rootView;
@@ -175,320 +216,190 @@ public class NearbyBeaconsFragment extends ListFragment implements MetadataResol
   @Override
   public void onResume() {
     super.onResume();
-    if (!mIsDemoMode) {
-      getActivity().getActionBar().setTitle(R.string.title_nearby_beacons);
-      getActivity().getActionBar().setDisplayHomeAsUpEnabled(false);
-      mScanningAnimationDrawable.start();
-      scanLeDevice(true);
-      mMdnsUrlDiscoverer.startScanning();
-      mSsdpUrlDiscoverer.startScanning();
-    } else {
-      getActivity().getActionBar().setTitle(R.string.title_nearby_beacons_demo);
-    }
+    getActivity().getActionBar().setTitle(R.string.title_nearby_beacons);
+    getActivity().getActionBar().setDisplayHomeAsUpEnabled(false);
+    getListView().setVisibility(View.INVISIBLE);
+    mDiscoveryServiceConnection.connect(true);
   }
 
   @Override
   public void onPause() {
     super.onPause();
-    if (!mIsDemoMode) {
-      if (mIsScanRunning) {
-        scanLeDevice(false);
-        mMdnsUrlDiscoverer.stopScanning();
-        mSsdpUrlDiscoverer.stopScanning();
-      }
-    }
+    mDiscoveryServiceConnection.disconnect();
   }
 
   @Override
   public void onPrepareOptionsMenu(Menu menu) {
     super.onPrepareOptionsMenu(menu);
-    if (mIsDemoMode) {
-      menu.findItem(R.id.action_config).setVisible(false);
-      menu.findItem(R.id.action_about).setVisible(false);
-      menu.findItem(R.id.action_demo).setVisible(false);
-    } else {
-      menu.findItem(R.id.action_config).setVisible(true);
-      menu.findItem(R.id.action_about).setVisible(true);
-      menu.findItem(R.id.action_demo).setVisible(true);
-    }
+    menu.findItem(R.id.action_config).setVisible(true);
+    menu.findItem(R.id.action_about).setVisible(true);
   }
 
   @Override
   public void onListItemClick(ListView l, View v, int position, long id) {
     // If we are scanning
-    if (mIsScanRunning) {
+    if (mScanningAnimationDrawable.isRunning()) {
       // Don't respond to touch events
       return;
     }
     // Get the url for the given item
-    String url = mNearbyDeviceAdapter.getUrlForListItem(position);
-    String urlToNavigateTo = url;
-    // If this url has metadata
-    if (mUrlToUrlMetadata.get(url) != null) {
-      String siteUrl = mUrlToUrlMetadata.get(url).siteUrl;
-      // If the metadata has a siteUrl
-      if (siteUrl != null) {
-        urlToNavigateTo = siteUrl;
-      }
-    }
-    openUrlInBrowser(urlToNavigateTo);
-  }
-
-  @Override
-  public void onUrlMetadataReceived(String url, MetadataResolver.UrlMetadata urlMetadata) {
-    mUrlToUrlMetadata.put(url, urlMetadata);
-    mNearbyDeviceAdapter.notifyDataSetChanged();
-  }
-
-  @Override
-  public void onUrlMetadataIconReceived() {
-    mNearbyDeviceAdapter.notifyDataSetChanged();
-  }
-
-  @Override
-  public void onDemoUrlMetadataReceived(String url, MetadataResolver.UrlMetadata urlMetadata) {
-    // Update the hash table
-    mUrlToUrlMetadata.put(url, urlMetadata);
-    // Fabricate the adapter values so that we can show these demo beacons
-    String mockAddress = generateMockBluetoothAddress(url.hashCode());
-    int mockRssi = 0;
-    int mockTxPower = 0;
-    mNearbyDeviceAdapter.addItem(url, mockAddress, mockTxPower);
-    mNearbyDeviceAdapter.updateItem(url, mockAddress, mockRssi, mockTxPower);
-    // Inform the list adapter of the new data
-    mNearbyDeviceAdapter.sortDevices();
-    mNearbyDeviceAdapter.notifyDataSetChanged();
-    // Stop the refresh animation
-    mSwipeRefreshWidget.setRefreshing(false);
-    fadeInListView();
-  }
-
-  @SuppressWarnings("deprecation")
-  private void scanLeDevice(final boolean enable) {
-    if (mIsScanRunning != enable) {
-      mIsScanRunning = enable;
-      // If we should start scanning
-      if (enable) {
-        // Stops scanning after the predefined scan time has elapsed.
-        mHandler.postDelayed(mScanTimeout, SCAN_TIME_MILLIS);
-        // Clear any stored url data
-        mUrlToUrlMetadata.clear();
-        mNearbyDeviceAdapter.clear();
-        // Start the scan
-        mBluetoothAdapter.startLeScan(mLeScanCallback);
-        // If we should stop scanning
-      } else {
-        // Cancel the scan timeout callback if still active or else it may fire later.
-        mHandler.removeCallbacks(mScanTimeout);
-        // Stop the scan
-        mBluetoothAdapter.stopLeScan(mLeScanCallback);
-        mSwipeRefreshWidget.setRefreshing(false);
-      }
-    }
-  }
-
-  private boolean leScanMatches(ScanRecord scanRecord) {
-    if (mScanFilterUuids == null) {
-      return true;
-    }
-    List services = scanRecord.getServiceUuids();
-    if (services != null) {
-      for (Parcelable uuid : mScanFilterUuids) {
-        if (services.contains(uuid)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  private void openUrlInBrowser(String url) {
-    // Ensure an http prefix exists in the url
-    if (!URLUtil.isNetworkUrl(url)) {
-      url = "http://" + url;
-    }
-    // Route through the proxy server go link
-    url = MetadataResolver.createUrlProxyGoLink(url);
-    // Open the browser and point it to the given url
-    Intent intent = new Intent(Intent.ACTION_VIEW);
-    intent.setData(Uri.parse(url));
+    PwoMetadata pwoMetadata = mNearbyDeviceAdapter.getItem(position);
+    Intent intent = pwoMetadata.createNavigateToUrlIntent();
     startActivity(intent);
   }
 
   @Override
-  public void onRefresh() {
-    if (mIsScanRunning) {
-      return;
-    }
-    mSwipeRefreshWidget.setRefreshing(true);
-    if (!mIsDemoMode) {
+  public void onUrlMetadataReceived(PwoMetadata pwoMetadata) {
+    safeNotifyChange();
+  }
+
+  @Override
+  public void onUrlMetadataAbsent(PwoMetadata pwoMetadata) {
+  }
+
+  @Override
+  public void onUrlMetadataIconReceived(PwoMetadata pwoMetadata) {
+    safeNotifyChange();
+  }
+
+  @Override
+  public void onUrlMetadataIconError(PwoMetadata pwoMetadata) {
+  }
+
+  private void stopScanningDisplay() {
+    // Cancel the scan timeout callback if still active or else it may fire later.
+    mHandler.removeCallbacks(mFirstScanTimeout);
+    mHandler.removeCallbacks(mSecondScanTimeout);
+    mHandler.removeCallbacks(mThirdScanTimeout);
+
+    // Change the display appropriately
+    mSwipeRefreshWidget.setRefreshing(false);
+    mScanningAnimationDrawable.stop();
+  }
+
+  private void startScanningDisplay(long scanStartTime, boolean hasResults) {
+    // Start the scanning animation only if we don't haven't already been scanning
+    // for long enough
+    long elapsedMillis = new Date().getTime() - scanStartTime;
+    if (elapsedMillis < FIRST_SCAN_TIME_MILLIS
+        || (elapsedMillis < SECOND_SCAN_TIME_MILLIS && !hasResults)) {
+      mScanningAnimationTextView.setAlpha(1f);
       mScanningAnimationDrawable.start();
-      scanLeDevice(true);
-      mMdnsUrlDiscoverer.startScanning();
-      mSsdpUrlDiscoverer.startScanning();
+      getListView().setVisibility(View.INVISIBLE);
     } else {
-      mNearbyDeviceAdapter.clear();
-      MetadataResolver.findDemoUrlMetadata(getActivity(), NearbyBeaconsFragment.this);
+      showListView();
     }
+
+    // Schedule the timeouts
+    // We delay at least 50 milliseconds to give the discovery service a chance to
+    // give us cached results.
+    mSecondScanComplete = false;
+    long firstDelay = Math.max(FIRST_SCAN_TIME_MILLIS - elapsedMillis, 50);
+    long secondDelay = Math.max(SECOND_SCAN_TIME_MILLIS - elapsedMillis, 50);
+    long thirdDelay = Math.max(THIRD_SCAN_TIME_MILLIS - elapsedMillis, 50);
+    mHandler.postDelayed(mFirstScanTimeout, firstDelay);
+    mHandler.postDelayed(mSecondScanTimeout, secondDelay);
+    mHandler.postDelayed(mThirdScanTimeout, thirdDelay);
   }
 
   @Override
-  public void onMdnsUrlFound(String url) {
-    onLanUrlFound(url);
+  public void onRefresh() {
+    // Clear any stored url data
+    mUrlToPwoMetadata.clear();
+    mPwoMetadataQueue.clear();
+    mNearbyDeviceAdapter.clear();
+
+    // Reconnect to the service
+    mDiscoveryServiceConnection.disconnect();
+    mSwipeRefreshWidget.setRefreshing(true);
+    mDiscoveryServiceConnection.connect(false);
   }
 
   @Override
-  public void onSsdpUrlFound(String url) {
-    onLanUrlFound(url);
-  }
-
-  private void onLanUrlFound(String url){
-    if (!mUrlToUrlMetadata.containsKey(url)) {
-      mUrlToUrlMetadata.put(url, null);
-      // Fabricate the adapter values so that we can show these ersatz beacons
-      String mockAddress = generateMockBluetoothAddress(url.hashCode());
-      int mockRssi = 0;
-      int mockTxPower = 0;
-      // Fetch the metadata for the given url
-      MetadataResolver.findUrlMetadata(getActivity(), NearbyBeaconsFragment.this, url, mockTxPower, mockRssi);
-      // Update the ranging info
-      mNearbyDeviceAdapter.updateItem(url, mockAddress, mockRssi, mockTxPower);
-      // Force the device to be added to the listview (since it has no metadata)
-      mNearbyDeviceAdapter.addItem(url, mockAddress, mockTxPower);
-    }
-  }
-
-  /**
-  * Callback for LE scan results.
-  */
-  private class LeScanCallback implements BluetoothAdapter.LeScanCallback {
-    @Override
-    public void onLeScan(final BluetoothDevice device, final int rssi, final byte[] scanBytes) {
-      ScanRecord scanRecord = ScanRecord.parseFromBytes(scanBytes);
-      if (leScanMatches(scanRecord)) {
-        final ScanResult scanResult = new ScanResult(device, scanRecord, rssi, SystemClock.elapsedRealtimeNanos());
-        getActivity().runOnUiThread(new Runnable() {
-          @Override
-          public void run() {
-            UriBeacon uriBeacon = UriBeacon.parseFromBytes(scanResult.getScanRecord().getBytes());
-            if ((uriBeacon != null) && (uriBeacon.getUriString() != null)) {
-              int txPower = uriBeacon.getTxPowerLevel();
-              String url = uriBeacon.getUriString();
-              // If we haven't yet seen this url
-              if (!mUrlToUrlMetadata.containsKey(url)) {
-                mUrlToUrlMetadata.put(url, null);
-                mNearbyDeviceAdapter.addItem(url, scanResult.getDevice().getAddress(), txPower);
-                // Fetch the metadata for this url
-                MetadataResolver.findUrlMetadata(getActivity(), NearbyBeaconsFragment.this, url, txPower, rssi);
-              }
-              // Tell the adapter to update stored data for this url
-              mNearbyDeviceAdapter.updateItem(url, scanResult.getDevice().getAddress(), scanResult.getRssi(), txPower);
-            }
-          }
-        });
+  public void onPwoDiscovered(PwoMetadata pwoMetadata) {
+    if (!mUrlToPwoMetadata.containsKey(pwoMetadata.url)) {
+      mUrlToPwoMetadata.put(pwoMetadata.url, pwoMetadata);
+      mPwoMetadataQueue.add(pwoMetadata);
+      if (mSecondScanComplete) {
+        // If we've already waited for the second scan timeout, go ahead and put the item in the
+        // listview.
+        emptyPwoMetadataQueue();
       }
     }
   }
 
-  private void fadeInListView() {
-    ObjectAnimator alphaAnimation = ObjectAnimator.ofFloat(getListView(), "alpha", 0, 1);
+  private void emptyPwoMetadataQueue() {
+    Collections.sort(mPwoMetadataQueue);
+    for (PwoMetadata pwoMetadata : mPwoMetadataQueue) {
+      mNearbyDeviceAdapter.addItem(pwoMetadata);
+    }
+    mPwoMetadataQueue.clear();
+    safeNotifyChange();
+  }
+
+  private void showListView() {
+    if (getListView().getVisibility() == View.VISIBLE) {
+      return;
+    }
+
+    mSwipeRefreshWidget.setRefreshing(false);
+    getListView().setAlpha(0f);
+    getListView().setVisibility(View.VISIBLE);
+    safeNotifyChange();
+    ObjectAnimator alphaAnimation = ObjectAnimator.ofFloat(getListView(), "alpha", 0f, 1f);
     alphaAnimation.setDuration(400);
     alphaAnimation.setInterpolator(new DecelerateInterpolator());
+    alphaAnimation.addListener(new AnimatorListener() {
+      @Override
+      public void onAnimationStart(Animator animation) {
+      }
+      @Override
+      public void onAnimationEnd(Animator animation) {
+        mScanningAnimationTextView.setAlpha(0f);
+        mScanningAnimationDrawable.stop();
+      }
+      @Override
+      public void onAnimationRepeat(Animator animation) {
+      }
+      @Override
+      public void onAnimationCancel(Animator animation) {
+      }
+    });
     alphaAnimation.start();
+  }
+
+  /**
+   * Notify the view that the underlying data has been changed.
+   *
+   * We need to make sure the view is visible because if it's not,
+   * the view will become visible when we notify it.
+   */
+  private void safeNotifyChange() {
+    if (getListView().getVisibility() == View.VISIBLE) {
+      mNearbyDeviceAdapter.notifyDataSetChanged();
+    }
   }
 
   // Adapter for holding beacons found through scanning.
   private class NearbyBeaconsAdapter extends BaseAdapter {
-
-    public final RegionResolver mRegionResolver;
-    private final HashMap<String, String> mUrlToDeviceAddress;
-    private List<String> mSortedDevices;
-    private final HashMap<String, Integer> mUrlToTxPower;
-    // Sort using local region-resolver regions
-    private Comparator<String> mSortByRegionResolverRegionComparator = new Comparator<String>() {
-      @Override
-      public int compare(String address, String otherAddress) {
-        // Check if one of the addresses is the nearest
-        final String nearest = mRegionResolver.getNearestAddress();
-        if (address.equals(nearest)) {
-          return -1;
-        }
-        if (otherAddress.equals(nearest)) {
-          return 1;
-        }
-        // Otherwise sort by region
-        int r1 = mRegionResolver.getRegion(address);
-        int r2 = mRegionResolver.getRegion(otherAddress);
-        if (r1 != r2) {
-          return ((Integer) r1).compareTo(r2);
-        }
-        // The two devices are in the same region, sort by device address.
-        return address.compareTo(otherAddress);
-      }
-    };
-    // Sort using local proxy server scores
-    private Comparator<String> mSortByProxyServerScoreComparator = new Comparator<String>() {
-      @Override
-      public int compare(String addressA, String addressB) {
-        MetadataResolver.UrlMetadata urlMetadataA = getUrlMetadataFromDeviceAddress(addressA);
-        MetadataResolver.UrlMetadata urlMetadataB = getUrlMetadataFromDeviceAddress(addressB);
-
-        // If metadata exists for both urls
-        if ((urlMetadataA != null) && (urlMetadataB != null)) {
-          float scoreA = urlMetadataA.score;
-          float scoreB = urlMetadataB.score;
-          // If the scores are not equal
-          if (scoreA != scoreB) {
-            // Sort so that higher scores show up higher in the list
-            return ((Float) scoreB).compareTo(scoreA);
-          }
-          // The scores are equal so sort by metadata title
-          String titleA = urlMetadataA.title;
-          String titleB = urlMetadataB.title;
-          return titleA.compareTo(titleB);
-        }
-
-        // Sort the url with metadata to be first
-        if (urlMetadataA == null) {
-          return 1;
-        }
-        return -1;
-      }
-    };
-
-    private MetadataResolver.UrlMetadata getUrlMetadataFromDeviceAddress(String addressToMatch) {
-      for (String url : mUrlToDeviceAddress.keySet()) {
-        if (mUrlToDeviceAddress.get(url).equals(addressToMatch)) {
-          return mUrlToUrlMetadata.get(url);
-        }
-      }
-      return null;
-    }
+    private List<PwoMetadata> mPwoMetadataList;
 
     NearbyBeaconsAdapter() {
-      mUrlToDeviceAddress = new HashMap<>();
-      mUrlToTxPower = new HashMap<>();
-      mRegionResolver = new RegionResolver();
-      mSortedDevices = new ArrayList<>();
+      mPwoMetadataList = new ArrayList<>();
     }
 
-    public void updateItem(String url, String address, int rssi, int txPower) {
-      mRegionResolver.onUpdate(address, rssi, txPower);
-    }
-
-    public void addItem(String url, String address, int txPower) {
-      mUrlToDeviceAddress.put(url, address);
-      mUrlToTxPower.put(url, txPower);
+    public void addItem(PwoMetadata pwoMetadata) {
+      mPwoMetadataList.add(pwoMetadata);
     }
 
     @Override
     public int getCount() {
-      return mSortedDevices.size();
+      return mPwoMetadataList.size();
     }
 
     @Override
-    public String getItem(int i) {
-      return mSortedDevices.get(i);
+    public PwoMetadata getItem(int i) {
+      return mPwoMetadataList.get(i);
     }
 
     @Override
@@ -501,7 +412,8 @@ public class NearbyBeaconsFragment extends ListFragment implements MetadataResol
     public View getView(int i, View view, ViewGroup viewGroup) {
       // Get the list view item for the given position
       if (view == null) {
-        view = getActivity().getLayoutInflater().inflate(R.layout.list_item_nearby_beacon, viewGroup, false);
+        view = getActivity().getLayoutInflater().inflate(R.layout.list_item_nearby_beacon,
+                                                         viewGroup, false);
       }
 
       // Reference the list item views
@@ -510,97 +422,113 @@ public class NearbyBeaconsFragment extends ListFragment implements MetadataResol
       TextView descriptionTextView = (TextView) view.findViewById(R.id.description);
       ImageView iconImageView = (ImageView) view.findViewById(R.id.icon);
 
-      // Get the url for the given position
-      String url = getUrlForListItem(i);
-
-      // Get the metadata for this url
-      MetadataResolver.UrlMetadata urlMetadata = mUrlToUrlMetadata.get(url);
-      // If the metadata exists
-      if (urlMetadata != null) {
+      // Get the metadata for the given position
+      PwoMetadata pwoMetadata = getItem(i);
+      if (pwoMetadata.hasUrlMetadata()) {
+        // If the url metadata exists
+        UrlMetadata urlMetadata = pwoMetadata.urlMetadata;
         // Set the title text
         titleTextView.setText(urlMetadata.title);
         // Set the url text
-        urlTextView.setText(urlMetadata.siteUrl);
+        urlTextView.setText(urlMetadata.displayUrl);
         // Set the description text
         descriptionTextView.setText(urlMetadata.description);
         // Set the favicon image
         iconImageView.setImageBitmap(urlMetadata.icon);
-      }
-      // If metadata does not yet exist
-      else {
+      } else {
+        // If metadata does not yet exist
         // Clear the children views content (in case this is a recycled list item view)
         titleTextView.setText("");
         iconImageView.setImageDrawable(null);
         // Set the url text to be the beacon's advertised url
-        urlTextView.setText(url);
+        urlTextView.setText(pwoMetadata.url);
         // Set the description text to show loading status
         descriptionTextView.setText(R.string.metadata_loading);
       }
 
-      // If we should show the ranging data
-      if (mDebugRangingViewEnabled) {
-        updateRangingDebugView(url, view);
+      if (mDebugViewEnabled) {
+        // If we should show the ranging data
+        updateDebugView(pwoMetadata, view);
         view.findViewById(R.id.ranging_debug_container).setVisibility(View.VISIBLE);
-      }
-      // Otherwise ensure it is not shown
-      else {
+        view.findViewById(R.id.metadata_debug_container).setVisibility(View.VISIBLE);
+        PwsClient.getInstance(getActivity()).useDevEndpoint();
+      } else {
+        // Otherwise ensure it is not shown
         view.findViewById(R.id.ranging_debug_container).setVisibility(View.GONE);
+        view.findViewById(R.id.metadata_debug_container).setVisibility(View.GONE);
+        PwsClient.getInstance(getActivity()).useProdEndpoint();
       }
 
       return view;
     }
 
-    private void updateRangingDebugView(String url, View view) {
-      String deviceAddress = mUrlToDeviceAddress.get(url);
-
-      int txPower = mUrlToTxPower.get(url);
-      String txPowerString = getString(R.string.ranging_debug_tx_power_prefix) + String.valueOf(txPower);
+    private void updateDebugView(PwoMetadata pwoMetadata, View view) {
+      // Ranging debug line
       TextView txPowerView = (TextView) view.findViewById(R.id.ranging_debug_tx_power);
-      txPowerView.setText(txPowerString);
-
-      int rssi = mRegionResolver.getSmoothedRssi(deviceAddress);
-      String rssiString = getString(R.string.ranging_debug_rssi_prefix) + String.valueOf(rssi);
       TextView rssiView = (TextView) view.findViewById(R.id.ranging_debug_rssi);
-      rssiView.setText(rssiString);
-
-      double distance = mRegionResolver.getDistance(deviceAddress);
-      String distanceString = getString(R.string.ranging_debug_distance_prefix) + new DecimalFormat("##.##").format(distance);
       TextView distanceView = (TextView) view.findViewById(R.id.ranging_debug_distance);
-      distanceView.setText(distanceString);
-
-      int region = mRegionResolver.getRegion(deviceAddress);
-      String regionString = getString(R.string.ranging_debug_region_prefix) + RangingUtils.toString(region);
       TextView regionView = (TextView) view.findViewById(R.id.ranging_debug_region);
-      regionView.setText(regionString);
-    }
+      if (pwoMetadata.hasBleMetadata()) {
+        BleMetadata bleMetadata = pwoMetadata.bleMetadata;
 
-    public String getUrlForListItem(int i) {
-      String address = getItem(i);
-      for (String url : mUrlToDeviceAddress.keySet()) {
-        if (mUrlToDeviceAddress.get(url).equals(address)) {
-          return url;
-        }
-      }
-      return null;
-    }
+        int txPower = bleMetadata.txPower;
+        String txPowerString = getString(R.string.ranging_debug_tx_power_prefix) + txPower;
+        txPowerView.setText(txPowerString);
 
-    public void sortDevices() {
-      mSortedDevices = new ArrayList<>(mUrlToDeviceAddress.values());
-      // If there are scores in the metadata
-      if (MetadataResolver.checkIfMetadataContainsSortingScores(mUrlToUrlMetadata.values())) {
-        // Sort using those scores
-        Collections.sort(mSortedDevices, mSortByProxyServerScoreComparator);
+        String deviceAddress = bleMetadata.deviceAddress;
+        int rssi = bleMetadata.getSmoothedRssi();
+        String rssiString = getString(R.string.ranging_debug_rssi_prefix) + rssi;
+        rssiView.setText(rssiString);
+
+        double distance = bleMetadata.getDistance();
+        String distanceString = getString(R.string.ranging_debug_distance_prefix)
+            + new DecimalFormat("##.##").format(distance);
+        distanceView.setText(distanceString);
+
+        String region = bleMetadata.getRegionString();
+        String regionString = getString(R.string.ranging_debug_region_prefix) + region;
+        regionView.setText(regionString);
+      } else {
+        txPowerView.setText("");
+        rssiView.setText("");
+        distanceView.setText("");
+        regionView.setText("");
       }
-      // If there are not scores in the metadata
-      else {
-        // Sort using the region resolver regions
-        Collections.sort(mSortedDevices, mSortByRegionResolverRegionComparator);
+
+      // Metadata debug line
+      double scanTime = pwoMetadata.scanMillis / 1000.0;
+      String scanTimeString = getString(R.string.metadata_debug_scan_time_prefix)
+          + new DecimalFormat("##.##s").format(scanTime);
+      TextView scanTimeView = (TextView) view.findViewById(R.id.metadata_debug_scan_time);
+      scanTimeView.setText(scanTimeString);
+
+      TextView rankView = (TextView) view.findViewById(R.id.metadata_debug_rank);
+      TextView pwsTripTimeView = (TextView) view.findViewById(R.id.metadata_debug_pws_trip_time);
+      TextView groupidView = (TextView) view.findViewById(R.id.metadata_debug_groupid);
+      if (pwoMetadata.hasUrlMetadata()) {
+        UrlMetadata urlMetadata = pwoMetadata.urlMetadata;
+        double rank = urlMetadata.rank;
+        String rankString = getString(R.string.metadata_debug_rank_prefix)
+            + new DecimalFormat("##.##").format(rank);
+        rankView.setText(rankString);
+
+        double pwsTripTime = pwoMetadata.pwsTripMillis / 1000.0;
+        String pwsTripTimeString = "" + getString(R.string.metadata_debug_pws_trip_time_prefix)
+            + new DecimalFormat("##.##s").format(pwsTripTime);
+        pwsTripTimeView.setText(pwsTripTimeString);
+
+        String groupidString = getString(R.string.metadata_debug_groupid_prefix)
+                + urlMetadata.groupid;
+        groupidView.setText(groupidString);
+      } else {
+        rankView.setText("");
+        pwsTripTimeView.setText("");
+        groupidView.setText("");
       }
     }
 
     public void clear() {
-      mSortedDevices.clear();
-      mUrlToDeviceAddress.clear();
+      mPwoMetadataList.clear();
       notifyDataSetChanged();
     }
   }

@@ -26,6 +26,7 @@ import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.widget.Toast;
 
 /**
  * The main entry point for the app.
@@ -45,10 +46,8 @@ public class MainActivity extends Activity {
    * Ensures Bluetooth is available on the beacon and it is enabled. If not,
    * displays a dialog requesting user permission to enable Bluetooth.
    */
-  private void ensureBluetoothIsEnabled() {
-    BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-    BluetoothAdapter bluetoothAdapter = bluetoothManager.getAdapter();
-    if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+  private void ensureBluetoothIsEnabled(BluetoothAdapter bluetoothAdapter) {
+    if (!bluetoothAdapter.isEnabled()) {
       Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
       startActivityForResult(enableBtIntent, REQUEST_ENABLE_BT);
     }
@@ -75,10 +74,6 @@ public class MainActivity extends Activity {
       case R.id.action_about:
         showAboutFragment();
         return true;
-      // If the demo menu item was selected
-      case R.id.action_demo:
-        showNearbyBeaconsFragment(true);
-        return true;
       // If the action bar up button was pressed
       case android.R.id.home:
         getFragmentManager().popBackStack();
@@ -88,25 +83,22 @@ public class MainActivity extends Activity {
   }
 
   @Override
-  protected void onPause() {
-    super.onPause();
-    if (checkIfUserHasOptedIn()) {
-      // The service runs when the app isn't running.
-      startUriBeaconDiscoveryService();
-    }
-  }
-
-  @Override
   protected void onResume() {
     super.onResume();
-    if (checkIfUserHasOptedIn()) {
-      ensureBluetoothIsEnabled();
-      // The service pauses while the app is running since the app does it's own scans or
-      // is configuring a UriBeacon using GATT which doesn't like to compete with scans.
-      stopUriBeaconDiscoveryService();
-      showNearbyBeaconsFragment(false);
+    BluetoothManager btManager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
+    BluetoothAdapter btAdapter = btManager != null ? btManager.getAdapter() : null;
+    if (btAdapter == null) {
+      Toast.makeText(getApplicationContext(),
+              R.string.error_bluetooth_support, Toast.LENGTH_LONG).show();
+      finish();
+      return;
     }
-    else {
+    if (checkIfUserHasOptedIn()) {
+      ensureBluetoothIsEnabled(btAdapter);
+      showNearbyBeaconsFragment();
+      Intent intent = new Intent(this, ScreenListenerService.class);
+      startService(intent);
+    } else {
       // Show the oob activity
       Intent intent = new Intent(this, OobActivity.class);
       startActivity(intent);
@@ -120,48 +112,26 @@ public class MainActivity extends Activity {
   }
 
   /**
-   * Stop the beacon discovery service from running.
-   */
-  private void stopUriBeaconDiscoveryService() {
-    Intent intent = new Intent(this, UriBeaconDiscoveryService.class);
-    stopService(intent);
-  }
-
-  /**
-   * Start up the BeaconDiscoveryService
-   */
-  private void startUriBeaconDiscoveryService() {
-    Intent intent = new Intent(this, UriBeaconDiscoveryService.class);
-    startService(intent);
-  }
-
-  /**
    * Show the fragment scanning nearby UriBeacons.
    */
-  private void showNearbyBeaconsFragment(boolean isDemoMode) {
-    if (!isDemoMode) {
-      // Look for an instance of the nearby beacons fragment
-      Fragment nearbyBeaconsFragment = getFragmentManager().findFragmentByTag(NEARBY_BEACONS_FRAGMENT_TAG);
-      // If the fragment does not exist
-      if (nearbyBeaconsFragment == null) {
-        // Create the fragment
-        getFragmentManager().beginTransaction()
-            .replace(R.id.main_activity_container, NearbyBeaconsFragment.newInstance(isDemoMode), NEARBY_BEACONS_FRAGMENT_TAG)
-            .commit();
-        // If the fragment does exist
-      } else {
-        // If the fragment is not currently visible
-        if (!nearbyBeaconsFragment.isVisible()) {
-          // Assume another fragment is visible, so pop that fragment off the stack
-          getFragmentManager().popBackStack();
-        }
-      }
-    } else {
+  private void showNearbyBeaconsFragment() {
+    // Look for an instance of the nearby beacons fragment
+    Fragment nearbyBeaconsFragment =
+        getFragmentManager().findFragmentByTag(NEARBY_BEACONS_FRAGMENT_TAG);
+    // If the fragment does not exist
+    if (nearbyBeaconsFragment == null) {
+      // Create the fragment
       getFragmentManager().beginTransaction()
-          .setCustomAnimations(R.anim.slide_up_fragment, R.anim.fade_out_fragment, R.anim.fade_in_activity, R.anim.fade_out_fragment)
-          .replace(R.id.main_activity_container, NearbyBeaconsFragment.newInstance(isDemoMode))
-          .addToBackStack(null)
+          .replace(R.id.main_activity_container, NearbyBeaconsFragment.newInstance(),
+                   NEARBY_BEACONS_FRAGMENT_TAG)
           .commit();
+      // If the fragment does exist
+    } else {
+      // If the fragment is not currently visible
+      if (!nearbyBeaconsFragment.isVisible()) {
+        // Assume another fragment is visible, so pop that fragment off the stack
+        getFragmentManager().popBackStack();
+      }
     }
   }
 
@@ -171,7 +141,8 @@ public class MainActivity extends Activity {
   private void showBeaconConfigFragment() {
     BeaconConfigFragment beaconConfigFragment = BeaconConfigFragment.newInstance();
     getFragmentManager().beginTransaction()
-        .setCustomAnimations(R.anim.fade_in_and_slide_up_fragment, R.anim.fade_out_fragment, R.anim.fade_in_activity, R.anim.fade_out_fragment)
+        .setCustomAnimations(R.anim.fade_in_and_slide_up_fragment, R.anim.fade_out_fragment,
+                             R.anim.fade_in_activity, R.anim.fade_out_fragment)
         .replace(R.id.main_activity_container, beaconConfigFragment)
         .addToBackStack(null)
         .commit();
@@ -183,14 +154,17 @@ public class MainActivity extends Activity {
   private void showAboutFragment() {
     AboutFragment aboutFragment = AboutFragment.newInstance();
     getFragmentManager().beginTransaction()
-        .setCustomAnimations(R.anim.fade_in_and_slide_up_fragment, R.anim.fade_out_fragment, R.anim.fade_in_activity, R.anim.fade_out_fragment)
+        .setCustomAnimations(R.anim.fade_in_and_slide_up_fragment, R.anim.fade_out_fragment,
+                             R.anim.fade_in_activity, R.anim.fade_out_fragment)
         .replace(R.id.main_activity_container, aboutFragment)
         .addToBackStack(null)
         .commit();
   }
 
   private boolean checkIfUserHasOptedIn() {
-    SharedPreferences sharedPreferences = getSharedPreferences("physical_web_preferences", Context.MODE_PRIVATE);
+    String preferencesKey = getString(R.string.main_prefs_key);
+    SharedPreferences sharedPreferences = getSharedPreferences(preferencesKey,
+                                                               Context.MODE_PRIVATE);
     return sharedPreferences.getBoolean(getString(R.string.user_opted_in_flag), false);
   }
 }

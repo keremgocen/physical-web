@@ -19,6 +19,9 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import "PWBeacon.h"
 
+#define PHYSICALWEB_SERVER_HOSTNAME @"url-caster.appspot.com"
+#define PHYSICALWEB_SERVER_HOSTNAME_DEV @"url-caster-dev.appspot.com"
+
 @interface PWMetadataRequest () <NSURLConnectionDataDelegate,
                                  NSURLConnectionDelegate>
 
@@ -29,6 +32,18 @@
   NSMutableURLRequest *_request;
   NSURLConnection *_connection;
   NSMutableData *_data;
+  NSTimeInterval _delay;
+  NSTimeInterval _startTime;
+}
+
+@synthesize delay = _delay;
+
++ (NSString *)hostname {
+  if ([[NSUserDefaults standardUserDefaults] boolForKey:@"DebugMode"]) {
+    return PHYSICALWEB_SERVER_HOSTNAME_DEV;
+  } else {
+    return PHYSICALWEB_SERVER_HOSTNAME;
+  }
 }
 
 - (id)init {
@@ -37,24 +52,28 @@
 }
 
 - (void)start {
+  _startTime = [NSDate timeIntervalSinceReferenceDate];
   if ([self isDemo]) {
-    NSURL *url =
-        [NSURL URLWithString:@"http://@" METADATA_SERVER_HOSTNAME @"/demo"];
+    NSString *urlString = [NSString
+        stringWithFormat:@"https://%@/demo", [PWMetadataRequest hostname]];
+    NSURL *url = [NSURL URLWithString:urlString];
     _request = [[NSMutableURLRequest alloc] initWithURL:url];
   } else {
     NSMutableArray *jsonPeripherals = [[NSMutableArray alloc] init];
     for (UBUriBeacon *beacon in [self uriBeacons]) {
       NSDictionary *jsonPeripheral = @{
         @"url" : [[beacon URI] absoluteString],
-        @"rssi" : [NSString stringWithFormat:@"%li", (long)[beacon RSSI]],
-        @"tx" : [NSString stringWithFormat:@"%li", (long)[beacon txPowerLevel]]
+        @"rssi" : [NSNumber numberWithLong:(long)[beacon RSSI]],
+        @"txpower" : [NSNumber numberWithLong:(long)[beacon txPowerLevel]]
       };
       [jsonPeripherals addObject:jsonPeripheral];
     }
     NSDictionary *jsonBody = @{ @"objects" : jsonPeripherals };
 
-    NSURL *url = [NSURL
-        URLWithString:@"http://" METADATA_SERVER_HOSTNAME @"/resolve-scan"];
+    NSString *urlString =
+        [NSString stringWithFormat:@"https://%@/resolve-scan",
+                                   [PWMetadataRequest hostname]];
+    NSURL *url = [NSURL URLWithString:urlString];
     _request = [[NSMutableURLRequest alloc] initWithURL:url];
     [_request setHTTPMethod:@"POST"];
     [_request setHTTPBody:[NSJSONSerialization dataWithJSONObject:jsonBody
@@ -90,6 +109,7 @@
 #pragma mark NSURLConnection delegate
 
 - (void)connectionDidFinishLoading:(NSURLConnection *)connection {
+  _delay = [NSDate timeIntervalSinceReferenceDate] - _startTime;
   _connection = nil;
   NSError *error;
   NSDictionary *result =
