@@ -3,7 +3,7 @@ package org.physical_web.collection;
 /**
  * A mock UrlDevice with a configurable rank value.
  */
-public class RankedDevice extends SimpleUrlDevice {
+public class RankedDevice extends UrlDevice {
   private double mRank;
 
   public RankedDevice(String id, String url, double rank) {
@@ -36,7 +36,7 @@ public class RankedDevice extends SimpleUrlDevice {
    */
   public static PwPair createRankedPair(String id, String url, String groupId, double rank) {
     UrlDevice urlDevice = new RankedDevice(id, url, rank);
-    PwsResult pwsResult = new PwsResult(url, url, groupId);
+    PwsResult pwsResult = new PwsResult(url, url, "title1", "description1", null, groupId);
     return new PwPair(urlDevice, pwsResult);
   }
 }

@@ -17,24 +17,37 @@ package org.physical_web.collection;
 
 import static org.junit.Assert.*;
 
+import org.json.JSONObject;
+
 import org.junit.Before;
 import org.junit.Test;
+
+import org.skyscreamer.jsonassert.JSONAssert;
 
 /**
  * SimpleUrlDevice unit test class.
  */
-public class SimpleUrlDeviceTest {
+public class UrlDeviceTest {
   private static final String ID1 = "id1";
   private static final String ID2 = "id2";
   private static final String URL1 = "http://example.com";
   private static final String URL2 = "http://physical-web.org";
   private static final double RANK1 = 0.5d;
   private static final double RANK2 = 0.9d;
-  private SimpleUrlDevice mUrlDevice1;
+  private UrlDevice mUrlDevice1;
+  private JSONObject jsonObject1;
 
   @Before
   public void setUp() {
-    mUrlDevice1 = new SimpleUrlDevice(ID1, URL1);
+    mUrlDevice1 = new UrlDevice(ID1, URL1);
+    mUrlDevice1.getExtraData().put("key", "value");
+    jsonObject1 = new JSONObject("{"
+        + "    \"id\": \"" + ID1 + "\","
+        + "    \"url\": \"" + URL1 + "\","
+        + "    \"extra\": {"
+        + "        \"key\": \"value\""
+        + "    }"
+        + "}");
   }
 
   @Test
@@ -49,8 +62,26 @@ public class SimpleUrlDeviceTest {
 
   @Test
   public void getRankReturnsPointFive() {
-    PwsResult pwsResult = new PwsResult(URL1, URL1, null);
+    PwsResult pwsResult = new PwsResult(URL1, URL1, "title1", "description1", null, null);
     assertEquals(.5, mUrlDevice1.getRank(pwsResult), .0001);
+  }
+
+  @Test
+  public void getExtraDataWorks() {
+    assertEquals(1, mUrlDevice1.getExtraData().length());
+  }
+
+  @Test
+  public void jsonSerializeWorks() {
+    JSONAssert.assertEquals(mUrlDevice1.jsonSerialize(), jsonObject1, true);
+  }
+
+  @Test
+  public void jsonDeserializeWorks() {
+    UrlDevice urlDevice = UrlDevice.jsonDeserialize(jsonObject1);
+    assertNotNull(urlDevice);
+    assertEquals(urlDevice.getId(), ID1);
+    assertEquals(urlDevice.getUrl(), URL1);
   }
 
   @Test
@@ -60,13 +91,14 @@ public class SimpleUrlDeviceTest {
 
   @Test
   public void alikeDevicesAreEqual() {
-    SimpleUrlDevice urlDevice2 = new SimpleUrlDevice(ID1, URL1);
-    assertEquals(mUrlDevice1, urlDevice2);
+    UrlDevice urlDevice = new UrlDevice(ID1, URL1);
+    urlDevice.getExtraData().put("key", "value");
+    assertEquals(mUrlDevice1, urlDevice);
   }
 
   @Test
   public void devicesWithDifferentClassButSameInfoAreEqual() {
-    UrlDevice simpleUrlDevice = new SimpleUrlDevice(ID1, URL1);
+    UrlDevice simpleUrlDevice = new UrlDevice(ID1, URL1);
     UrlDevice rankedDevice = new RankedDevice(ID1, URL1, RANK1);
     assertEquals(rankedDevice, simpleUrlDevice);
     assertEquals(simpleUrlDevice, rankedDevice);
@@ -74,14 +106,15 @@ public class SimpleUrlDeviceTest {
 
   @Test
   public void devicesWithDifferentRankButSameInfoAreEqual() {
-    UrlDevice urlDevice2 = new RankedDevice(ID1, URL1, RANK2); // different rank
-    assertEquals(mUrlDevice1, urlDevice2); // equals should not consider rank
+    UrlDevice urlDevice = new RankedDevice(ID1, URL1, RANK2); // different rank
+    urlDevice.getExtraData().put("key", "value");
+    assertEquals(mUrlDevice1, urlDevice); // equals should not consider rank
   }
 
   @Test
   public void unalikeDevicesAreNotEqual() {
-    SimpleUrlDevice urlDevice2 = new SimpleUrlDevice(ID1, URL2); // same id, different url
-    SimpleUrlDevice urlDevice3 = new SimpleUrlDevice(ID2, URL1); // same url, different id
+    UrlDevice urlDevice2 = new UrlDevice(ID1, URL2); // same id, different url
+    UrlDevice urlDevice3 = new UrlDevice(ID2, URL1); // same url, different id
     assertNotEquals(mUrlDevice1, urlDevice2);
     assertNotEquals(mUrlDevice1, urlDevice3);
   }
@@ -93,7 +126,7 @@ public class SimpleUrlDeviceTest {
 
   @Test
   public void compareDeviceToAlikeDeviceReturnsZero() {
-    UrlDevice urlDevice2 = new SimpleUrlDevice(ID1, URL1);
+    UrlDevice urlDevice2 = new UrlDevice(ID1, URL1);
     UrlDevice urlDevice3 = new RankedDevice(ID1, URL1, RANK1);
     assertEquals(mUrlDevice1.compareTo(urlDevice2), 0); // identical device
     assertEquals(mUrlDevice1.compareTo(urlDevice3), 0); // same info, but uses a RankedDevice
@@ -109,8 +142,8 @@ public class SimpleUrlDeviceTest {
 
   @Test
   public void compareDeviceToUnalikeDeviceReturnsNonZero() {
-    UrlDevice urlDevice2 = new SimpleUrlDevice(ID2, URL1); // different device ID
-    UrlDevice urlDevice3 = new SimpleUrlDevice(ID1, URL2); // different URL
+    UrlDevice urlDevice2 = new UrlDevice(ID2, URL1); // different device ID
+    UrlDevice urlDevice3 = new UrlDevice(ID1, URL2); // different URL
     assertTrue(mUrlDevice1.compareTo(urlDevice2) < 0); // "id1" < "id2"
     assertTrue(urlDevice2.compareTo(mUrlDevice1) > 0);
     assertTrue(mUrlDevice1.compareTo(urlDevice3) < 0); // "example.com" < "physical-web.org"

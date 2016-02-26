@@ -34,28 +34,24 @@ public class PhysicalWebCollection {
   private static final int SCHEMA_VERSION = 1;
   private static final String SCHEMA_VERSION_KEY = "schema";
   private static final String DEVICES_KEY = "devices";
-  private static final String TYPE_KEY = "type";
-  private static final String DATA_KEY = "data";
   private static final String METADATA_KEY = "metadata";
-  private static final String REQUESTURL_KEY = "requesturl";
-  private static final String SITEURL_KEY = "siteurl";
-  private static final String GROUPID_KEY = "groupid";
-  private static final String DEFAULT_PWS_ENDPOINT = "https://url-caster.appspot.com";
   private PwsClient mPwsClient;
   private Map<String, UrlDevice> mDeviceIdToUrlDeviceMap;
-  private Map<Class, UrlDeviceJsonSerializer> mUrlDeviceTypeToUrlDeviceJsonSerializer;
   private Map<String, PwsResult> mBroadcastUrlToPwsResultMap;
+  private Map<String, byte[]> mIconUrlToIconMap;
   private Set<String> mPendingBroadcastUrls;
+  private Set<String> mPendingIconUrls;
 
   /**
    * Construct a PhysicalWebCollection.
    */
   public PhysicalWebCollection() {
-    mPwsClient = new PwsClient(DEFAULT_PWS_ENDPOINT);
+    mPwsClient = new PwsClient();
     mDeviceIdToUrlDeviceMap = new HashMap<>();
-    mUrlDeviceTypeToUrlDeviceJsonSerializer = new HashMap<>();
     mBroadcastUrlToPwsResultMap = new HashMap<>();
+    mIconUrlToIconMap = new HashMap<>();
     mPendingBroadcastUrls = new HashSet<>();
+    mPendingIconUrls = new HashSet<>();
   }
 
   /**
@@ -72,6 +68,24 @@ public class PhysicalWebCollection {
    */
   public void addMetadata(PwsResult pwsResult) {
     mBroadcastUrlToPwsResultMap.put(pwsResult.getRequestUrl(), pwsResult);
+  }
+
+  /**
+   * Add an Icon to the collection.
+   * @param url The url of the icon.
+   * @param icon The bitmap of the icon.
+   */
+  public void addIcon(String url, byte[] icon) {
+    mIconUrlToIconMap.put(url, icon);
+  }
+
+  /**
+   * Get an Icon from the collection.
+   * @param url The url of the icon.
+   * @return The associated icon.  This will be null if there is no icon.
+   */
+  public byte[] getIcon(String url) {
+    return mIconUrlToIconMap.get(url);
   }
 
   /**
@@ -93,72 +107,23 @@ public class PhysicalWebCollection {
   }
 
   /**
-   * Add a UrlDeviceJsonSerializer to be associated with a particular class.
-   * @param urlDeviceType the class UrlDevices to serialize and deserialize with this
-   *        serializer.
-   * @param urlDeviceJsonSerializer the serializer to use in serializing UrlDevices.
-   * @param <T> the subclass of UrlDevice that the serializer will deserialize to.
-   */
-  public <T extends UrlDevice> void addUrlDeviceJsonSerializer(
-      Class<? extends T> urlDeviceType,
-      UrlDeviceJsonSerializer<T> urlDeviceJsonSerializer) {
-    mUrlDeviceTypeToUrlDeviceJsonSerializer.put(urlDeviceType, urlDeviceJsonSerializer);
-  }
-
-  @SuppressWarnings("unchecked")
-  private JSONObject jsonSerializeUrlDevice(UrlDevice urlDevice)
-      throws PhysicalWebCollectionException {
-    // Loop through the superclasses of urlDevice to see which serializer we should use.
-    for (Class urlDeviceType = urlDevice.getClass();
-         UrlDevice.class.isAssignableFrom(urlDeviceType);
-         urlDeviceType = urlDeviceType.getSuperclass()) {
-      UrlDeviceJsonSerializer urlDeviceJsonSerializer =
-          mUrlDeviceTypeToUrlDeviceJsonSerializer.get(urlDeviceType);
-      UrlDeviceJsonSerializer<UrlDevice> specificUrlDeviceJsonSerializer =
-          (UrlDeviceJsonSerializer<UrlDevice>) urlDeviceJsonSerializer;
-      if (urlDeviceJsonSerializer != null) {
-        JSONObject jsonObject = new JSONObject();
-        jsonObject.put(TYPE_KEY, urlDevice.getClass().getName());
-        jsonObject.put(DATA_KEY, specificUrlDeviceJsonSerializer.serialize(urlDevice));
-        return jsonObject;
-      }
-    }
-    throw new PhysicalWebCollectionException(
-        "No suitable UrlDeviceJsonSerializer found for " + urlDevice.getClass().getName());
-  }
-
-  private JSONObject jsonSerializePwsResult(PwsResult pwsResult) {
-    JSONObject jsonObject = new JSONObject();
-    jsonObject.put(REQUESTURL_KEY, pwsResult.getRequestUrl());
-    jsonObject.put(SITEURL_KEY, pwsResult.getSiteUrl());
-
-    String groupId = pwsResult.getGroupId();
-    if (groupId != null && !groupId.equals("")) {
-      jsonObject.put(GROUPID_KEY, groupId);
-    }
-
-    return jsonObject;
-  }
-
-  /**
    * Create a JSON object that represents this data structure.
    * @return a JSON serialization of this data structure.
-   * @throws PhysicalWebCollectionException on invalid or unrecognized input
    */
-  public JSONObject jsonSerialize() throws PhysicalWebCollectionException {
+  public JSONObject jsonSerialize() {
     JSONObject jsonObject = new JSONObject();
 
     // Serialize the UrlDevices
     JSONArray urlDevices = new JSONArray();
     for (UrlDevice urlDevice : mDeviceIdToUrlDeviceMap.values()) {
-      urlDevices.put(jsonSerializeUrlDevice(urlDevice));
+      urlDevices.put(urlDevice.jsonSerialize());
     }
     jsonObject.put(DEVICES_KEY, urlDevices);
 
     // Serialize the URL metadata
     JSONArray metadata = new JSONArray();
     for (PwsResult pwsResult : mBroadcastUrlToPwsResultMap.values()) {
-      metadata.put(jsonSerializePwsResult(pwsResult));
+      metadata.put(pwsResult.jsonSerialize());
     }
     jsonObject.put(METADATA_KEY, metadata);
 
@@ -166,52 +131,14 @@ public class PhysicalWebCollection {
     return jsonObject;
   }
 
-  @SuppressWarnings("unchecked")
-  private UrlDevice jsonDeserializeUrlDevice(JSONObject jsonObject)
-      throws PhysicalWebCollectionException {
-    // Get the type and raw data out of the json object.
-    JSONObject dataJson = jsonObject.getJSONObject(DATA_KEY);
-    String typeName = jsonObject.getString(TYPE_KEY);
-    Class urlDeviceType = null;
-    try {
-      urlDeviceType = Class.forName(typeName);
-    } catch (ClassNotFoundException e) {
-      throw new PhysicalWebCollectionException(
-          "No suitable UrlDeviceJsonSerializer found for " + typeName);
-    }
-
-    // Loop through the superclasses of urlDevice to see which serializer we should use.
-    for (;
-         UrlDevice.class.isAssignableFrom(urlDeviceType);
-         urlDeviceType = urlDeviceType.getSuperclass()) {
-      UrlDeviceJsonSerializer urlDeviceJsonSerializer =
-          mUrlDeviceTypeToUrlDeviceJsonSerializer.get(urlDeviceType);
-      UrlDeviceJsonSerializer<UrlDevice> specificUrlDeviceJsonSerializer =
-          (UrlDeviceJsonSerializer<UrlDevice>) urlDeviceJsonSerializer;
-      if (urlDeviceJsonSerializer != null) {
-        return specificUrlDeviceJsonSerializer.deserialize(dataJson);
-      }
-    }
-    throw new PhysicalWebCollectionException(
-        "No suitable UrlDeviceJsonSerializer found for " + typeName);
-  }
-
-  private PwsResult jsonDeserializePwsResult(JSONObject jsonObject) {
-    String requestUrl = jsonObject.getString(REQUESTURL_KEY);
-    String siteUrl = jsonObject.getString(SITEURL_KEY);
-    String groupId = null;
-    if (jsonObject.has(GROUPID_KEY)) {
-      groupId = jsonObject.getString(GROUPID_KEY);
-    }
-    return new PwsResult(requestUrl, siteUrl, groupId);
-  }
-
   /**
    * Populate this data structure with UrlDevices represented by a given JSON object.
    * @param jsonObject a serialized PhysicalWebCollection.
+   * @return The PhysicalWebCollection represented by the serialized object.
    * @throws PhysicalWebCollectionException on invalid or unrecognized input
    */
-  public void jsonDeserialize(JSONObject jsonObject) throws PhysicalWebCollectionException {
+  public static PhysicalWebCollection jsonDeserialize(JSONObject jsonObject)
+      throws PhysicalWebCollectionException {
     // Check the schema version
     int schemaVersion = jsonObject.getInt(SCHEMA_VERSION_KEY);
     if (schemaVersion > SCHEMA_VERSION) {
@@ -219,22 +146,25 @@ public class PhysicalWebCollection {
           "Cannot handle schema version " + schemaVersion + ".  "
           + "This library only knows of schema version " + SCHEMA_VERSION);
     }
+    PhysicalWebCollection collection = new PhysicalWebCollection();
 
     // Deserialize the UrlDevices
     JSONArray urlDevices = jsonObject.getJSONArray(DEVICES_KEY);
     for (int i = 0; i < urlDevices.length(); i++) {
       JSONObject urlDeviceJson = urlDevices.getJSONObject(i);
-      UrlDevice urlDevice = jsonDeserializeUrlDevice(urlDeviceJson);
-      addUrlDevice(urlDevice);
+      UrlDevice urlDevice = UrlDevice.jsonDeserialize(urlDeviceJson);
+      collection.addUrlDevice(urlDevice);
     }
 
     // Deserialize the URL metadata
     JSONArray metadata = jsonObject.getJSONArray(METADATA_KEY);
     for (int i = 0; i < metadata.length(); i++) {
-      JSONObject metadataPair = metadata.getJSONObject(i);
-      PwsResult pwsResult = jsonDeserializePwsResult(metadataPair);
-      addMetadata(pwsResult);
+      JSONObject pwsResultJson = metadata.getJSONObject(i);
+      PwsResult pwsResult = PwsResult.jsonDeserialize(pwsResultJson);
+      collection.addMetadata(pwsResult);
     }
+
+    return collection;
   }
 
   /**
@@ -286,6 +216,19 @@ public class PhysicalWebCollection {
       }
     }
     return allPwPairs;
+  }
+
+  /**
+   * Return the top-ranked PwPair for a given group ID.
+   * @return a PwPair.
+   */
+  public PwPair getTopRankedPwPairByGroupId(String groupId) {
+    for (PwPair pwPair : getGroupedPwPairsSortedByRank()) {
+      if (pwPair.getPwsResult().getGroupId().equals(groupId)) {
+        return pwPair;
+      }
+    }
+    return null;
   }
 
   /**
@@ -355,49 +298,104 @@ public class PhysicalWebCollection {
     mPwsClient.setPwsEndpoint(pwsEndpoint);
   }
 
-  /**
-   * Triggers an HTTP request to be made to the PWS.
-   * This method fetches a PwsResult for all broadcast URLs that do not have a
-   * PwsResult.
-   * @param pwsResultCallback The callback to run when we get an HTTPResponse.
-   */
-  public void fetchPwsResults(final PwsResultCallback pwsResultCallback) {
-    // Get new URLs to fetch.
-    Set<String> newUrls = new HashSet<>();
-    for (UrlDevice urlDevice : mDeviceIdToUrlDeviceMap.values()) {
-      String url = urlDevice.getUrl();
-      if (!mPendingBroadcastUrls.contains(url)
-          && !mBroadcastUrlToPwsResultMap.containsKey(url)) {
-        newUrls.add(url);
-        mPendingBroadcastUrls.add(url);
-      }
+  private class AugmentedPwsResultIconCallback extends PwsResultIconCallback {
+    private String mUrl;
+    private PwsResultIconCallback mCallback;
+
+    AugmentedPwsResultIconCallback(String url, PwsResultIconCallback callback) {
+      mUrl = url;
+      mCallback = callback;
     }
 
-    // Make the request.
-    PwsResultCallback augmentedCallback = new PwsResultCallback() {
-      public void onPwsResult(PwsResult pwsResult) {
-        mPendingBroadcastUrls.remove(pwsResult.getRequestUrl());
-        addMetadata(pwsResult);
-        pwsResultCallback.onPwsResult(pwsResult);
-      }
+    @Override
+    public void onIcon(byte[] icon) {
+      mPendingIconUrls.remove(mUrl);
+      addIcon(mUrl, icon);
+      mCallback.onIcon(icon);
+    }
 
-      public void onPwsResultAbsent(String url) {
-        mPendingBroadcastUrls.remove(url);
-        pwsResultCallback.onPwsResultAbsent(url);
-      }
-
-      public void onPwsResultError(Collection<String> urls, int httpResponseCode, Exception e) {
-        for (String url : urls) {
-          mPendingBroadcastUrls.remove(url);
-        }
-        pwsResultCallback.onPwsResultError(urls, httpResponseCode, e);
-      }
-    };
-    if (newUrls.size() > 0) {
-      mPwsClient.resolve(newUrls, augmentedCallback);
+    @Override
+    public void onError(int httpResponseCode, Exception e) {
+      mPendingIconUrls.remove(mUrl);
+      mCallback.onError(httpResponseCode, e);
     }
   }
 
+  /**
+   * Triggers an HTTP request to be made to the PWS.
+   * This method fetches a results from the PWS for all broadcast URLs,
+   * depending on the supplied parameters.
+   * @param pwsResultCallback The callback to run when we get an HTTPResponse.
+   * If this value is null, we will not fetch the PwsResults, only icons.
+   * @param pwsResultIconCallback The callback to run when we get a favicon.
+   * If this value is null, we will not fetch the icons.
+   */
+  public void fetchPwsResults(final PwsResultCallback pwsResultCallback,
+                              final PwsResultIconCallback pwsResultIconCallback) {
+    // Get new URLs to fetch.
+    Set<String> newResolveUrls = new HashSet<>();
+    Set<String> newIconUrls = new HashSet<>();
+    for (UrlDevice urlDevice : mDeviceIdToUrlDeviceMap.values()) {
+      String url = urlDevice.getUrl();
+      if (!mPendingBroadcastUrls.contains(url)) {
+        PwsResult pwsResult = mBroadcastUrlToPwsResultMap.get(url);
+        if (pwsResult == null) {
+          newResolveUrls.add(url);
+          mPendingBroadcastUrls.add(url);
+        } else if (pwsResult.hasIconUrl()
+            && !mPendingIconUrls.contains(pwsResult.getIconUrl())
+            && !mIconUrlToIconMap.containsKey(pwsResult.getIconUrl())) {
+          newIconUrls.add(pwsResult.getIconUrl());
+          mPendingIconUrls.add(pwsResult.getIconUrl());
+        }
+      }
+    }
+
+    // Make the resolve request.
+    final Set<String> finalResolveUrls = newResolveUrls;
+    PwsResultCallback augmentedCallback = new PwsResultCallback() {
+      @Override
+      public void onPwsResult(PwsResult pwsResult) {
+        addMetadata(pwsResult);
+        if (pwsResultIconCallback != null) {
+            PwsResultIconCallback augmentedIconCallback =
+                new AugmentedPwsResultIconCallback(pwsResult.getIconUrl(), pwsResultIconCallback);
+            mPwsClient.downloadIcon(pwsResult.getIconUrl(), augmentedIconCallback);
+        }
+        pwsResultCallback.onPwsResult(pwsResult);
+      }
+
+      @Override
+      public void onPwsResultAbsent(String url) {
+        pwsResultCallback.onPwsResultAbsent(url);
+      }
+
+      @Override
+      public void onPwsResultError(Collection<String> urls, int httpResponseCode, Exception e) {
+        pwsResultCallback.onPwsResultError(urls, httpResponseCode, e);
+      }
+
+      @Override
+      public void onResponseReceived(long durationMillis) {
+        for (String url : finalResolveUrls) {
+          mPendingBroadcastUrls.remove(url);
+        }
+        pwsResultCallback.onResponseReceived(durationMillis);
+      }
+    };
+    if (pwsResultCallback != null && newResolveUrls.size() > 0) {
+      mPwsClient.resolve(newResolveUrls, augmentedCallback);
+    }
+
+    // Make the icon requests.
+    if (pwsResultIconCallback != null) {
+      for (final String iconUrl : newIconUrls) {
+        PwsResultIconCallback augmentedIconCallback =
+            new AugmentedPwsResultIconCallback(iconUrl, pwsResultIconCallback);
+        mPwsClient.downloadIcon(iconUrl, augmentedIconCallback);
+      }
+    }
+  }
 
   /**
    * Cancel all current HTTP requests.

@@ -22,6 +22,7 @@ import org.json.JSONObject;
 import java.net.MalformedURLException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -31,9 +32,17 @@ import java.util.Set;
  * HTTP client that makes requests to the Physical Web Service.
  */
 public class PwsClient {
+  private static final String DEFAULT_PWS_ENDPOINT = "https://url-caster.appspot.com";
   private static final String RESOLVE_SCAN_PATH = "resolve-scan";
   private String mPwsEndpoint;
   private List<Thread> mThreads;
+
+  /**
+   * Construct a PwsClient.
+   */
+  public PwsClient() {
+    this(DEFAULT_PWS_ENDPOINT);
+  }
 
   /**
    * Construct a PwsClient.
@@ -64,8 +73,15 @@ public class PwsClient {
   public void resolve(final Collection<String> broadcastUrls,
                       final PwsResultCallback pwsResultCallback) {
     // Create the response callback.
+    final long startTime = new Date().getTime();
     JsonObjectRequest.RequestCallback requestCallback = new JsonObjectRequest.RequestCallback() {
+      private void recordResponse() {
+        pwsResultCallback.onResponseReceived(new Date().getTime() - startTime);
+      }
+
       public void onResponse(JSONObject result) {
+        recordResponse();
+
         // Build the metadata from the response.
         JSONArray foundMetadata;
         try {
@@ -80,14 +96,23 @@ public class PwsClient {
         for (int i = 0; i < foundMetadata.length(); i++) {
           String requestUrl = null;
           String responseUrl = null;
+          String title = null;
+          String description = null;
+          String iconUrl = null;
+          String groupId = null;
           try {
             JSONObject jsonUrlMetadata = foundMetadata.getJSONObject(i);
             requestUrl = jsonUrlMetadata.getString("id");
             responseUrl = jsonUrlMetadata.getString("url");
+            title = jsonUrlMetadata.getString("title");
+            description = jsonUrlMetadata.getString("description");
+            iconUrl = jsonUrlMetadata.optString("icon");
+            groupId = jsonUrlMetadata.optString("groupId");
           } catch (JSONException e) {
             continue;
           }
-          PwsResult pwsResult = new PwsResult(requestUrl, responseUrl, null);
+          PwsResult pwsResult =
+              new PwsResult(requestUrl, responseUrl, title, description, iconUrl, groupId);
           pwsResultCallback.onPwsResult(pwsResult);
           foundUrls.add(pwsResult.getRequestUrl());
         }
@@ -101,6 +126,7 @@ public class PwsClient {
       }
 
       public void onError(int responseCode, Exception e) {
+        recordResponse();
         pwsResultCallback.onPwsResultError(broadcastUrls, responseCode, e);
       }
     };
@@ -125,6 +151,32 @@ public class PwsClient {
       request = new JsonObjectRequest(targetUrl, payload, requestCallback);
     } catch (MalformedURLException e) {
       pwsResultCallback.onPwsResultError(broadcastUrls, 0, e);
+      return;
+    }
+    makeRequest(request);
+  }
+
+  /**
+   * Given an icon url returned by the PWS, fetch that icon.
+   * @param url The icon URL returned by the PWS.
+   * @param pwsResultIconCallback The callback to run on an HTTP response.
+   */
+  public void downloadIcon(final String url, final PwsResultIconCallback pwsResultIconCallback) {
+    BitmapRequest.RequestCallback requestCallback = new BitmapRequest.RequestCallback() {
+      public void onResponse(byte[] result) {
+        pwsResultIconCallback.onIcon(result);
+      }
+
+      public void onError(int responseCode, Exception e) {
+        pwsResultIconCallback.onError(responseCode, e);
+      }
+    };
+
+    Request request;
+    try {
+      request = new BitmapRequest(url, requestCallback);
+    } catch (MalformedURLException e) {
+      pwsResultIconCallback.onError(0, e);
       return;
     }
     makeRequest(request);
